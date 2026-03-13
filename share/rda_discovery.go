@@ -143,11 +143,20 @@ func colNS(col int) string { return fmt.Sprintf("rda/col/%d", col) }
 func (d *RDADiscovery) advertise(ctx context.Context) {
 	ttl := libp2pDisc.TTL(rdaAdvertiseTTL)
 
-	if _, err := d.disc.Advertise(ctx, rowNS(d.myPos.Row), ttl); err != nil {
-		log.Debugf("RDA advertise row=%d failed: %v", d.myPos.Row, err)
+	rowNS := rowNS(d.myPos.Row)
+	colNS := colNS(d.myPos.Col)
+
+	log.Debugf("RDA Discovery: advertise START - row_namespace=%s, col_namespace=%s", rowNS, colNS)
+
+	if _, err := d.disc.Advertise(ctx, rowNS, ttl); err != nil {
+		log.Warnf("RDA Discovery: advertise FAILED - row namespace %s: %v", rowNS, err)
+	} else {
+		log.Debugf("RDA Discovery: advertise SUCCESS - row namespace %s ✓", rowNS)
 	}
-	if _, err := d.disc.Advertise(ctx, colNS(d.myPos.Col), ttl); err != nil {
-		log.Debugf("RDA advertise col=%d failed: %v", d.myPos.Col, err)
+	if _, err := d.disc.Advertise(ctx, colNS, ttl); err != nil {
+		log.Warnf("RDA Discovery: advertise FAILED - col namespace %s: %v", colNS, err)
+	} else {
+		log.Debugf("RDA Discovery: advertise SUCCESS - col namespace %s ✓", colNS)
 	}
 }
 
@@ -159,21 +168,26 @@ func (d *RDADiscovery) discoverAndConnect(ctx context.Context) {
 
 // findAndConnect queries the DHT for ns and connects to all returned peers.
 func (d *RDADiscovery) findAndConnect(ctx context.Context, ns string) {
+	log.Debugf("RDA Discovery: findAndConnect START - namespace=%s", ns)
+
 	findCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	peerCh, err := d.disc.FindPeers(findCtx, ns, libp2pDisc.Limit(rdaDiscoveryLimit))
 	if err != nil {
-		log.Debugf("RDA findPeers [%s] failed: %v", ns, err)
+		log.Warnf("RDA Discovery: findAndConnect FAILED - namespace=%s, error: %v", ns, err)
 		return
 	}
 
+	peersFound := 0
 	for {
 		select {
 		case <-ctx.Done():
+			log.Debugf("RDA Discovery: findAndConnect CANCELLED - namespace=%s, peers_found=%d", ns, peersFound)
 			return
 		case pi, ok := <-peerCh:
 			if !ok {
+				log.Debugf("RDA Discovery: findAndConnect COMPLETE - namespace=%s, peers_found=%d", ns, peersFound)
 				return
 			}
 			if pi.ID == "" || pi.ID == d.host.ID() {
@@ -183,6 +197,7 @@ func (d *RDADiscovery) findAndConnect(ctx context.Context, ns string) {
 			if d.host.Network().Connectedness(pi.ID) == network.Connected {
 				continue
 			}
+			peersFound++
 			go d.connectPeer(pi, ns)
 		}
 	}
@@ -193,19 +208,27 @@ func (d *RDADiscovery) connectPeer(pi peer.AddrInfo, ns string) {
 	ctx, cancel := context.WithTimeout(context.Background(), rdaConnectTimeout)
 	defer cancel()
 
+	peerID := pi.ID.String()[:8]
+	log.Debugf("RDA Discovery: connectPeer START - peer=%s, namespace=%s", peerID, ns)
+
 	if err := d.host.Connect(ctx, pi); err != nil {
-		log.Debugf("RDA connect %s [%s] failed: %v", pi.ID, ns, err)
+		log.Warnf("RDA Discovery: connectPeer FAILED - peer=%s, namespace=%s, error: %v", peerID, ns, err)
 		return
 	}
-	log.Debugf("RDA connected to %s via [%s]", pi.ID, ns)
+	log.Infof("RDA Discovery: connectPeer SUCCESS - peer=%s via namespace=%s ✓", peerID, ns)
 }
 
 // connectToBootstrap connects directly to known bootstrap peers.
 // Used during Start to get an initial foothold in the DHT network.
 func (d *RDADiscovery) connectToBootstrap(ctx context.Context) {
+	log.Infof("RDA Discovery: connectToBootstrap START - bootstrap_peers=%d", len(d.bootstrapPeers))
+
 	var wg sync.WaitGroup
+	connCh := make(chan bool, len(d.bootstrapPeers))
+
 	for _, bp := range d.bootstrapPeers {
 		if bp.ID == d.host.ID() {
+			log.Debugf("RDA Discovery: connectToBootstrap - skipping self peer")
 			continue
 		}
 		wg.Add(1)
@@ -213,14 +236,33 @@ func (d *RDADiscovery) connectToBootstrap(ctx context.Context) {
 			defer wg.Done()
 			dialCtx, cancel := context.WithTimeout(ctx, rdaConnectTimeout)
 			defer cancel()
+
+			peerID := p.ID.String()[:8]
+			log.Debugf("RDA Discovery: bootstrap connect attempt - peer=%s", peerID)
+
 			if err := d.host.Connect(dialCtx, p); err != nil {
-				log.Debugf("RDA bootstrap connect %s failed: %v", p.ID, err)
+				log.Warnf("RDA Discovery: bootstrap connect FAILED - peer=%s, error: %v", peerID, err)
+				connCh <- false
 			} else {
-				log.Infof("RDA bootstrap connected to %s", p.ID)
+				log.Infof("RDA Discovery: bootstrap connect SUCCESS - peer=%s ✓", peerID)
+				connCh <- true
 			}
 		}(bp)
 	}
-	wg.Wait()
+
+	go func() {
+		wg.Wait()
+		close(connCh)
+	}()
+
+	connected := 0
+	for success := range connCh {
+		if success {
+			connected++
+		}
+	}
+
+	log.Infof("RDA Discovery: connectToBootstrap COMPLETE - total=%d, connected=%d", len(d.bootstrapPeers), connected)
 }
 
 // GetMyRendezvousPoints returns the DHT namespaces this node advertises under.

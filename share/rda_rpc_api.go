@@ -7,7 +7,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"time"
+
+	logging "github.com/ipfs/go-log/v2"
 )
+
+var rpcLog = logging.Logger("rda.rpc")
 
 // RDAAPI defines the RPC API interface for RDA operations
 // This interface is used to expose RDA functionality over JSON-RPC
@@ -79,6 +83,7 @@ func NewRDAAPI(service *RDANodeService) RDAAPI {
 // GetMyPosition returns this node's position in the grid
 func (a *rdaAPI) GetMyPosition(ctx context.Context) (*RDAPosition, error) {
 	pos := a.service.GetMyPosition()
+	rpcLog.Debugf("RDA RPC: GetMyPosition - position=(%d, %d)", pos.Row, pos.Col)
 	return &RDAPosition{
 		Row: pos.Row,
 		Col: pos.Col,
@@ -87,6 +92,7 @@ func (a *rdaAPI) GetMyPosition(ctx context.Context) (*RDAPosition, error) {
 
 // GetStatus returns the current status of the node
 func (a *rdaAPI) GetStatus(ctx context.Context) (*RDAStatus, error) {
+	startTime := time.Now()
 	myPos := a.service.GetMyPosition()
 	rowPeers := a.service.GetRowPeers()
 	colPeers := a.service.GetColPeers()
@@ -95,7 +101,7 @@ func (a *rdaAPI) GetStatus(ctx context.Context) (*RDAStatus, error) {
 	dims := gridMgr.GetGridDimensions()
 	rowID, colID := GetSubnetIDs(a.service.host.ID(), dims)
 
-	return &RDAStatus{
+	status := &RDAStatus{
 		Position: RDAPosition{
 			Row: myPos.Row,
 			Col: myPos.Col,
@@ -109,7 +115,13 @@ func (a *rdaAPI) GetStatus(ctx context.Context) (*RDAStatus, error) {
 		},
 		RowTopic: rowID,
 		ColTopic: colID,
-	}, nil
+	}
+
+	duration := time.Since(startTime)
+	rpcLog.Infof("RDA RPC: GetStatus - position=(%d,%d), row_peers=%d, col_peers=%d, total=%d, latency=%dms",
+		myPos.Row, myPos.Col, len(rowPeers), len(colPeers), status.TotalPeers, duration.Milliseconds())
+
+	return status, nil
 }
 
 // GetNodeInfo returns detailed information about the node

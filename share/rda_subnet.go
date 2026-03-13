@@ -116,16 +116,21 @@ func (s *RDASubnetManager) PublishToRow(ctx context.Context, data []byte) error 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	log.Debugf("RDA Subnet: PublishToRow START - topic=%s, data_size=%d bytes", s.rowTopic, len(data))
+
 	rowTopic, err := s.pubsub.Join(s.rowTopic)
 	if err != nil {
+		log.Warnf("RDA Subnet: PublishToRow FAILED - failed to join row topic %s: %v", s.rowTopic, err)
 		return fmt.Errorf("failed to join row topic: %w", err)
 	}
 	defer rowTopic.Close()
 
 	if err := rowTopic.Publish(ctx, data); err != nil {
+		log.Warnf("RDA Subnet: PublishToRow FAILED - failed to publish to row topic %s: %v", s.rowTopic, err)
 		return fmt.Errorf("failed to publish to row topic: %w", err)
 	}
 
+	log.Infof("RDA Subnet: PublishToRow SUCCESS - topic=%s, data_size=%d bytes ✓", s.rowTopic, len(data))
 	return nil
 }
 
@@ -134,16 +139,21 @@ func (s *RDASubnetManager) PublishToCol(ctx context.Context, data []byte) error 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	log.Debugf("RDA Subnet: PublishToCol START - topic=%s, data_size=%d bytes", s.colTopic, len(data))
+
 	colTopic, err := s.pubsub.Join(s.colTopic)
 	if err != nil {
+		log.Warnf("RDA Subnet: PublishToCol FAILED - failed to join col topic %s: %v", s.colTopic, err)
 		return fmt.Errorf("failed to join col topic: %w", err)
 	}
 	defer colTopic.Close()
 
 	if err := colTopic.Publish(ctx, data); err != nil {
+		log.Warnf("RDA Subnet: PublishToCol FAILED - failed to publish to col topic %s: %v", s.colTopic, err)
 		return fmt.Errorf("failed to publish to col topic: %w", err)
 	}
 
+	log.Infof("RDA Subnet: PublishToCol SUCCESS - topic=%s, data_size=%d bytes ✓", s.colTopic, len(data))
 	return nil
 }
 

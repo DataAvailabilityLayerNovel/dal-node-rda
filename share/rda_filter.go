@@ -6,7 +6,10 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	logging "github.com/ipfs/go-log/v2"
 )
+
+var peerFilterLog = logging.Logger("rda.filter")
 
 // PeerFilter enforces RDA grid constraints on peer communication
 type PeerFilter struct {
@@ -64,6 +67,13 @@ func NewPeerFilter(
 		position = pos
 	}
 
+	peerFilterLog.Infof(
+		"RDA Filter initialized: node at (row=%d, col=%d), policy: row=%v, col=%v, allow_any=%v, max_row=%d, max_col=%d",
+		position.Row, position.Col,
+		policy.AllowRowCommunication, policy.AllowColCommunication, policy.AllowAny,
+		policy.MaxRowPeers, policy.MaxColPeers,
+	)
+
 	return &PeerFilter{
 		gridManager:  gridManager,
 		myPeerID:     host.ID(),
@@ -85,24 +95,29 @@ func (pf *PeerFilter) CanCommunicate(peerID peer.ID) (bool, string) {
 	defer pf.mu.RUnlock()
 
 	if pf.filterPolicy.AllowAny {
+		peerFilterLog.Debugf("RDA Filter: CanCommunicate - peer %s ALLOWED (allow_any=true)", peerID.String()[:8])
 		return true, "allow_any"
 	}
 
 	pos, ok := pf.gridManager.GetPeerPosition(peerID)
 	if !ok {
+		peerFilterLog.Debugf("RDA Filter: CanCommunicate - peer %s REJECTED (not registered)", peerID.String()[:8])
 		return false, "peer_not_registered"
 	}
 
 	// Check if peer is in the same row
 	if pf.filterPolicy.AllowRowCommunication && pos.Row == pf.myPosition.Row {
+		peerFilterLog.Debugf("RDA Filter: CanCommunicate - peer %s ALLOWED (row_peer: row=%d)", peerID.String()[:8], pos.Row)
 		return true, "row_peer"
 	}
 
 	// Check if peer is in the same column
 	if pf.filterPolicy.AllowColCommunication && pos.Col == pf.myPosition.Col {
+		peerFilterLog.Debugf("RDA Filter: CanCommunicate - peer %s ALLOWED (col_peer: col=%d)", peerID.String()[:8], pos.Col)
 		return true, "col_peer"
 	}
 
+	peerFilterLog.Debugf("RDA Filter: CanCommunicate - peer %s REJECTED (not in subnet: peer_pos=(%d,%d), my_pos=(%d,%d))", peerID.String()[:8], pos.Row, pos.Col, pf.myPosition.Row, pf.myPosition.Col)
 	return false, "not_in_subnet"
 }
 
@@ -111,24 +126,32 @@ func (pf *PeerFilter) FilterPeers(peers []peer.ID) []peer.ID {
 	pf.mu.RLock()
 	defer pf.mu.RUnlock()
 
+	peerFilterLog.Debugf("RDA Filter: FilterPeers START - input_peers=%d, max_row=%d, max_col=%d", len(peers), pf.filterPolicy.MaxRowPeers, pf.filterPolicy.MaxColPeers)
+
 	filtered := make([]peer.ID, 0, len(peers))
 	rowCount := 0
 	colCount := 0
+	rejectedCount := 0
 
 	for _, p := range peers {
 		can, reason := pf.CanCommunicate(p)
 		if !can {
+			rejectedCount++
 			continue
 		}
 
 		// Check limits
 		if reason == "row_peer" {
 			if pf.filterPolicy.MaxRowPeers > 0 && rowCount >= pf.filterPolicy.MaxRowPeers {
+				peerFilterLog.Debugf("RDA Filter: FilterPeers - row_peer (%s) rejected (limit reached: %d/%d)", p.String()[:8], rowCount, pf.filterPolicy.MaxRowPeers)
+				rejectedCount++
 				continue
 			}
 			rowCount++
 		} else if reason == "col_peer" {
 			if pf.filterPolicy.MaxColPeers > 0 && colCount >= pf.filterPolicy.MaxColPeers {
+				peerFilterLog.Debugf("RDA Filter: FilterPeers - col_peer (%s) rejected (limit reached: %d/%d)", p.String()[:8], colCount, pf.filterPolicy.MaxColPeers)
+				rejectedCount++
 				continue
 			}
 			colCount++
@@ -137,6 +160,7 @@ func (pf *PeerFilter) FilterPeers(peers []peer.ID) []peer.ID {
 		filtered = append(filtered, p)
 	}
 
+	peerFilterLog.Infof("RDA Filter: FilterPeers COMPLETE - output_peers=%d, row_peers=%d, col_peers=%d, rejected=%d", len(filtered), rowCount, colCount, rejectedCount)
 	return filtered
 }
 
@@ -175,6 +199,12 @@ func (pf *PeerFilter) GetAllowedPeers(gridManager *RDAGridManager) []peer.ID {
 func (pf *PeerFilter) SetPolicy(policy FilterPolicy) {
 	pf.mu.Lock()
 	defer pf.mu.Unlock()
+
+	peerFilterLog.Infof("RDA Filter: SetPolicy - row=%v, col=%v, allow_any=%v, max_row=%d, max_col=%d",
+		policy.AllowRowCommunication, policy.AllowColCommunication, policy.AllowAny,
+		policy.MaxRowPeers, policy.MaxColPeers,
+	)
+
 	pf.filterPolicy = policy
 }
 
