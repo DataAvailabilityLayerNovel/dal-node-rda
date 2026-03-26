@@ -73,6 +73,7 @@ type RDARetrieval struct {
 	config   RDARetrievalConfig
 	storage  *RDAStorage
 	resolver ColumnPeerResolver
+	metrics  *RDAMetrics // RDA metrics recorder
 	mu       sync.RWMutex
 
 	// Metrics
@@ -89,10 +90,12 @@ func NewRDARetrieval(config RDARetrievalConfig, storage *RDAStorage, resolver Co
 		config.MyRow, config.MyCol, config.GridSize,
 	)
 
+	metrics, _ := InitRDAMetrics() // Initialize RDA metrics
 	return &RDARetrieval{
 		config:   config,
 		storage:  storage,
 		resolver: resolver,
+		metrics:  metrics,
 	}
 }
 
@@ -211,6 +214,16 @@ func (r *RDARetrieval) RetrieveShareLocal(ctx context.Context, req *RetrievalReq
 	r.mu.Unlock()
 
 	latency := time.Now().UnixMilli() - req.Timestamp
+	latencyMs := float64(latency)
+	
+	// Record metrics
+	if r.metrics != nil {
+		ctx := context.Background()
+		r.metrics.RecordDirectFetchLatency(ctx, latencyMs)
+		r.metrics.RecordDirectRecoveryBytes(ctx, int64(len(data)))
+		r.metrics.RecordErasureRecoveryAttemptWithCounters(ctx, true)
+	}
+	
 	rdaRetrievalLog.Infof(
 		"RDA Retrieval: LOCAL retrieval [%s] SUCCESS - height=%d, (row=%d, col=%d), symbolID=%d, data_size=%d bytes, latency=%dms ✓",
 		req.RequestID, req.Height, req.Row, req.Col, req.SymbolID, len(data), latency,
@@ -317,6 +330,16 @@ func (r *RDARetrieval) RetrieveShareRemote(ctx context.Context, req *RetrievalRe
 		r.mu.Unlock()
 
 		latency := time.Now().UnixMilli() - req.Timestamp
+		latencyMs := float64(latency)
+		
+		// Record metrics
+		if r.metrics != nil {
+			ctx := context.Background()
+			r.metrics.RecordDirectFetchLatency(ctx, latencyMs)
+			r.metrics.RecordDirectRecoveryBytes(ctx, int64(len(response.Data)))
+			r.metrics.RecordErasureRecoveryAttemptWithCounters(ctx, true)
+		}
+		
 		rdaRetrievalLog.Infof(
 			"RDA Retrieval: REMOTE retrieval SUCCESS [%s] - height=%d, (row=%d, col=%d), symbolID=%d, data_size=%d bytes, from peer %s ✓ (latency=%dms, hop=1)",
 			req.RequestID, req.Height, req.Row, req.Col, req.SymbolID, len(response.Data), peerID, latency,
@@ -329,6 +352,12 @@ func (r *RDARetrieval) RetrieveShareRemote(ctx context.Context, req *RetrievalRe
 	r.mu.Lock()
 	r.retrievalFailures++
 	r.mu.Unlock()
+
+	// Record failed recovery attempt
+	if r.metrics != nil {
+		ctx := context.Background()
+		r.metrics.RecordErasureRecoveryAttemptWithCounters(ctx, false)
+	}
 
 	rdaRetrievalLog.Warnf(
 		"RDA Retrieval: REMOTE retrieval FAILED - all %d peers failed, last error: %v",

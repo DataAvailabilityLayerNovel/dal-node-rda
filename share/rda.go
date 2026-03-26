@@ -1,11 +1,13 @@
 package share
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -28,6 +30,7 @@ type RDAGridManager struct {
 	dims     GridDimensions
 	peerGrid map[string]GridPosition // peerID -> position
 	mu       sync.RWMutex
+	metrics  *RDAMetrics // RDA-specific metrics
 }
 
 // GridPosition biểu diễn vị trí của node trong grid
@@ -38,9 +41,11 @@ type GridPosition struct {
 
 // NewRDAGridManager khởi tạo một RDAGridManager
 func NewRDAGridManager(dims GridDimensions) *RDAGridManager {
+	metrics, _ := InitRDAMetrics() // Initialize metrics (non-fatal if fails)
 	return &RDAGridManager{
 		dims:     dims,
 		peerGrid: make(map[string]GridPosition),
+		metrics:  metrics,
 	}
 }
 
@@ -69,6 +74,22 @@ func GetCoords(id peer.ID, dims GridDimensions) GridPosition {
 	return GridPosition{Row: row, Col: col}
 }
 
+// GetCoordsWithMetrics wraps GetCoords and records latency metrics
+func GetCoordsWithMetrics(ctx context.Context, id peer.ID, dims GridDimensions, metrics *RDAMetrics) GridPosition {
+	start := time.Now()
+	defer func() {
+		latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
+		if metrics != nil {
+			// Record latency for coordinate resolution
+			if latencyMs < 1 {
+				metrics.RecordRowSyncLatency(ctx, latencyMs)
+			}
+		}
+	}()
+
+	return GetCoords(id, dims)
+}
+
 // GetSubnetIDs trả về định danh chuỗi cho Subnet của hàng và cột
 // Dùng để đăng ký các Topic trong GossipSub hoặc Discovery
 func GetSubnetIDs(id peer.ID, dims GridDimensions) (rowID string, colID string) {
@@ -93,6 +114,14 @@ func (g *RDAGridManager) RegisterPeer(peerID peer.ID) GridPosition {
 
 	pos := GetCoords(peerID, g.dims)
 	g.peerGrid[peerID.String()] = pos
+
+	// Update connected peers metric
+	if g.metrics != nil {
+		ctx := context.Background()
+		peerCount := int64(len(g.peerGrid))
+		g.metrics.UpdateConnectedPeers(ctx, peerCount)
+	}
+
 	return pos
 }
 
@@ -107,6 +136,7 @@ func (g *RDAGridManager) GetPeerPosition(peerID peer.ID) (GridPosition, bool) {
 
 // GetRowPeers trả về tất cả peers trong cùng hàng
 func (g *RDAGridManager) GetRowPeers(row int) []peer.ID {
+	start := time.Now()
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -119,11 +149,20 @@ func (g *RDAGridManager) GetRowPeers(row int) []peer.ID {
 			}
 		}
 	}
+
+	// Record fetch latency
+	latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
+	if g.metrics != nil {
+		ctx := context.Background()
+		g.metrics.RecordRowSyncLatency(ctx, latencyMs)
+	}
+
 	return peers
 }
 
 // GetColPeers trả về tất cả peers trong cùng cột
 func (g *RDAGridManager) GetColPeers(col int) []peer.ID {
+	start := time.Now()
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -136,6 +175,14 @@ func (g *RDAGridManager) GetColPeers(col int) []peer.ID {
 			}
 		}
 	}
+
+	// Record fetch latency
+	latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
+	if g.metrics != nil {
+		ctx := context.Background()
+		g.metrics.RecordColSyncLatency(ctx, latencyMs)
+	}
+
 	return peers
 }
 

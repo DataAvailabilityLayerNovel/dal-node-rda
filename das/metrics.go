@@ -31,6 +31,13 @@ type metrics struct {
 	lastSampledTS atomic.Uint64
 
 	clientReg metric.Registration
+
+	// RDA-specific metrics
+	rdaMatrixDirect     metric.Float64Histogram // Direct matrix fetch latency
+	rdaErasureRecovery  metric.Int64Counter     // Successful erasure recoveries
+	rdaRecoveryLatency  metric.Float64Histogram // Recovery operation latency
+	rdaBandwidthSavings metric.Float64Gauge     // Bandwidth savings %
+	rdaThroughput       metric.Int64Counter     // Sampling operations/sec
 }
 
 func (d *DASer) InitMetrics() error {
@@ -95,6 +102,42 @@ func (d *DASer) InitMetrics() error {
 		getHeaderTime: getHeaderTime,
 		newHead:       newHead,
 	}
+
+	// Initialize RDA-specific metrics
+	rdaMatrixDirect, err := meter.Float64Histogram("rda_matrix_direct_fetch_latency_ms",
+		metric.WithDescription("Direct fetch latency within RDA matrix (milliseconds)"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaMatrixDirect = rdaMatrixDirect
+
+	rdaErasureRecovery, err := meter.Int64Counter("rda_erasure_recovery_total",
+		metric.WithDescription("Total successful erasure code recoveries"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaErasureRecovery = rdaErasureRecovery
+
+	rdaRecoveryLatency, err := meter.Float64Histogram("rda_data_recovery_latency_ms",
+		metric.WithDescription("Time to recover unavailable data (milliseconds)"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaRecoveryLatency = rdaRecoveryLatency
+
+	rdaBandwidthSavings, err := meter.Float64Gauge("rda_bandwidth_savings_percent",
+		metric.WithDescription("Bandwidth savings vs standard Gossip (%)"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaBandwidthSavings = rdaBandwidthSavings
+
+	rdaThroughput, err := meter.Int64Counter("rda_sampling_operations_total",
+		metric.WithDescription("Total RDA sampling operations completed"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaThroughput = rdaThroughput
 
 	callback := func(ctx context.Context, observer metric.Observer) error {
 		stats, err := d.sampler.stats(ctx)
@@ -190,4 +233,64 @@ func (m *metrics) observeNewHead(ctx context.Context) {
 	}
 	ctx = utils.ResetContextOnError(ctx)
 	m.newHead.Add(ctx, 1)
+}
+
+// observeRDAMatrixDirectFetch records direct fetch latency within RDA matrix
+func (m *metrics) observeRDAMatrixDirectFetch(ctx context.Context, latencyMs float64) {
+	if m == nil || m.rdaMatrixDirect == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaMatrixDirect.Record(ctx, latencyMs,
+		metric.WithAttributes(
+			attribute.String("fetch_type", "rda_direct"),
+		))
+}
+
+// recordRDAErasureRecovery records successful erasure code recovery
+func (m *metrics) recordRDAErasureRecovery(ctx context.Context) {
+	if m == nil || m.rdaErasureRecovery == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaErasureRecovery.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("recovery_type", "erasure_coding"),
+		))
+}
+
+// observeRDARecoveryLatency records data recovery operation latency
+func (m *metrics) observeRDARecoveryLatency(ctx context.Context, latencyMs float64) {
+	if m == nil || m.rdaRecoveryLatency == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaRecoveryLatency.Record(ctx, latencyMs,
+		metric.WithAttributes(
+			attribute.String("recovery_method", "erasure_reconstruction"),
+		))
+}
+
+// updateRDABandwidthSavings updates bandwidth savings percentage
+func (m *metrics) updateRDABandwidthSavings(ctx context.Context, savingsPercent float64) {
+	if m == nil || m.rdaBandwidthSavings == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaBandwidthSavings.Record(ctx, savingsPercent,
+		metric.WithAttributes(
+			attribute.String("baseline", "gossip_protocol"),
+		))
+}
+
+// recordRDASamplingOperation records a completed RDA sampling operation
+func (m *metrics) recordRDASamplingOperation(ctx context.Context) {
+	if m == nil || m.rdaThroughput == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaThroughput.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("sample_type", "rda_matrix"),
+		))
 }
