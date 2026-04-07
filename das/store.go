@@ -40,11 +40,22 @@ func (s *checkpointStore) load(ctx context.Context) (checkpoint, error) {
 
 	cp := checkpoint{}
 	err = json.Unmarshal(bs, &cp)
-	return cp, err
+	if err != nil {
+		return checkpoint{}, err
+	}
+	cp.normalizeVersion()
+	cp.normalizeCursor()
+	if err := cp.validateVersion(); err != nil {
+		return checkpoint{}, err
+	}
+	return cp, nil
 }
 
 // checkpointStore stores the given DAS checkpoint to disk.
 func (s *checkpointStore) store(ctx context.Context, cp checkpoint) error {
+	cp.normalizeVersion()
+	cp.normalizeCursor()
+
 	// checkpointStore latest DASed checkpoint to disk here to ensure that if DASer is not yet
 	// fully caught up to network head, it will resume DASing from this checkpoint
 	// up to current network head

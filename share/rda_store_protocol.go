@@ -33,7 +33,7 @@ const (
 type StoreMessageType string
 
 const (
-	StoreMessageTypeStore   StoreMessageType = "store"   // (store, h, i, x)
+	StoreMessageTypeStore    StoreMessageType = "store"     // (store, h, i, x)
 	StoreMessageTypeStoreFwd StoreMessageType = "store_fwd" // (store_fwd, h, i, x)
 )
 
@@ -44,10 +44,10 @@ type StoreMessage struct {
 	Type StoreMessageType `json:"type"`
 
 	// Data triple (h, i, x dạng simplified)
-	Handle     string `json:"handle"`    // h: DataRoot
+	Handle     string `json:"handle"`      // h: DataRoot
 	ShareIndex uint32 `json:"share_index"` // i: Index
-	RowID      uint32 `json:"row_id"`    // Hàng tạo share này
-	ColID      uint32 `json:"col_id"`    // Cột (chứa share này)
+	RowID      uint32 `json:"row_id"`      // Hàng tạo share này
+	ColID      uint32 `json:"col_id"`      // Cột (chứa share này)
 
 	// Raw data - ở đây là simplified version (thực tế là RDASymbol)
 	Data []byte `json:"data"` // x: Raw share data
@@ -56,10 +56,10 @@ type StoreMessage struct {
 	NMTProof *NMTProofData `json:"nmt_proof,omitempty"`
 
 	// Metadata
-	Timestamp  int64  `json:"timestamp"`
-	SenderID   string `json:"sender_id"`   // PeerID của người gửi
-	SenderRow  uint32 `json:"sender_row"`  // Row của người gửi
-	SenderCol  uint32 `json:"sender_col"`  // Col của người gửi
+	Timestamp   int64  `json:"timestamp"`
+	SenderID    string `json:"sender_id"`  // PeerID của người gửi
+	SenderRow   uint32 `json:"sender_row"` // Row của người gửi
+	SenderCol   uint32 `json:"sender_col"` // Col của người gửi
 	BlockHeight uint64 `json:"block_height"`
 }
 
@@ -78,11 +78,11 @@ type StoreMessageResponse struct {
 
 // RDAStoreProtocolHandler - Xử lý STORE messages từ broadcast
 type RDAStoreProtocolHandler struct {
-	host            host.Host
-	gridManager     *RDAGridManager
-	peerManager     *RDAPeerManager
-	subnetManager   *RDASubnetManager
-	storage         *RDAStorage // Local storage
+	host             host.Host
+	gridManager      *RDAGridManager
+	peerManager      *RDAPeerManager
+	subnetManager    *RDASubnetManager
+	storage          *RDAStorage // Local storage
 	predicateChecker *RDAPredicateChecker
 
 	// Subscription listeners
@@ -90,11 +90,11 @@ type RDAStoreProtocolHandler struct {
 	storeFwdListeners []StoreFwdMessageListener
 
 	// Statistics
-	mu                   sync.RWMutex
-	totalStoreReceived   int64
-	totalStoreForwarded  int64
+	mu                    sync.RWMutex
+	totalStoreReceived    int64
+	totalStoreForwarded   int64
 	totalStoreFwdReceived int64
-	failedValidations   int64
+	failedValidations     int64
 }
 
 // StoreMessageListener - Callback khi nhận STORE message
@@ -112,13 +112,13 @@ func NewRDAStoreProtocolHandler(
 	storage *RDAStorage,
 ) *RDAStoreProtocolHandler {
 	return &RDAStoreProtocolHandler{
-		host:             host,
-		gridManager:      gridManager,
-		peerManager:      peerManager,
-		subnetManager:    subnetManager,
-		storage:          storage,
-		predicateChecker: NewRDAPredicateChecker(uint32(gridManager.GetGridDimensions().Cols)),
-		storeListeners:   make([]StoreMessageListener, 0),
+		host:              host,
+		gridManager:       gridManager,
+		peerManager:       peerManager,
+		subnetManager:     subnetManager,
+		storage:           storage,
+		predicateChecker:  NewRDAPredicateChecker(uint32(gridManager.GetGridDimensions().Cols)),
+		storeListeners:    make([]StoreMessageListener, 0),
 		storeFwdListeners: make([]StoreFwdMessageListener, 0),
 	}
 }
@@ -163,14 +163,14 @@ func (h *RDAStoreProtocolHandler) handleStoreStream(stream network.Stream) {
 	}
 
 	startTime := time.Now()
-	storeLog.Debugf("RDA|STORE|RECEIVE peer=%s handle=%s index=%d row=%d col=%d size=%d", 
+	storeLog.Debugf("RDA|STORE|RECEIVE peer=%s handle=%s index=%d row=%d col=%d size=%d",
 		peerID.String()[:8], msg.Handle[:8], msg.ShareIndex, msg.RowID, msg.ColID, len(msg.Data))
 
 	// Process STORE message
 	h.processStoreMessage(stream.Conn().RemoteMultiaddr().String(), &msg)
 
 	latency := time.Since(startTime).Milliseconds()
-	storeLog.Infof("RDA|STORE|COMPLETE peer=%s handle=%s index=%d latency=%dms", 
+	storeLog.Infof("RDA|STORE|COMPLETE peer=%s handle=%s index=%d latency=%dms",
 		peerID.String()[:8], msg.Handle[:8], msg.ShareIndex, latency)
 }
 
@@ -183,16 +183,16 @@ func (h *RDAStoreProtocolHandler) processStoreMessage(senderAddr string, msg *St
 
 	// ========== BƯỚC 1: VALIDATION ==========
 	storeLog.Debugf("RDA|STORE|VALIDATE_START handle=%s index=%d", msg.Handle[:8], msg.ShareIndex)
-	
+
 	// Chạy Pred(h, i, x) để kiểm tra hợp lệ
 	symbol := &RDASymbol{
-		Handle:     msg.Handle,
-		ShareIndex: msg.ShareIndex,
-		Row:        msg.RowID,
-		Col:        msg.ColID,
-		ShareData:  msg.Data,
-		NMTProof:   *msg.NMTProof,
-		Timestamp:  msg.Timestamp,
+		Handle:      msg.Handle,
+		ShareIndex:  msg.ShareIndex,
+		Row:         msg.RowID,
+		Col:         msg.ColID,
+		ShareData:   msg.Data,
+		NMTProof:    *msg.NMTProof,
+		Timestamp:   msg.Timestamp,
 		BlockHeight: msg.BlockHeight,
 	}
 
@@ -205,11 +205,12 @@ func (h *RDAStoreProtocolHandler) processStoreMessage(senderAddr string, msg *St
 	storeLog.Debugf("RDA|STORE|VALIDATE_OK ✓ handle=%s index=%d", msg.Handle[:8], msg.ShareIndex)
 
 	// ========== BƯỚC 2: STORAGE ==========
-	storeLog.Debugf("RDA|STORE|STORAGE_WRITE_START row=%d col=%d index=%d size=%d", 
+	storeLog.Debugf("RDA|STORE|STORAGE_WRITE_START row=%d col=%d index=%d size=%d",
 		msg.RowID, msg.ColID, msg.ShareIndex, len(msg.Data))
-	
+
 	// Lưu vào local storage
 	rdaShare := &RDAShare{
+		Handle:   msg.Handle,
 		Row:      msg.RowID,
 		Col:      msg.ColID,
 		SymbolID: msg.ShareIndex,
@@ -226,25 +227,25 @@ func (h *RDAStoreProtocolHandler) processStoreMessage(senderAddr string, msg *St
 	}
 
 	h.totalStoreReceived++
-	storeLog.Infof("RDA|STORE|STORAGE_SUCCESS ✓ handle=%s index=%d row=%d col=%d size=%d", 
+	storeLog.Infof("RDA|STORE|STORAGE_SUCCESS ✓ handle=%s index=%d row=%d col=%d size=%d",
 		msg.Handle[:8], msg.ShareIndex, msg.RowID, msg.ColID, len(msg.Data))
 
 	// ========== BƯỚC 3: FORWARD (STORE_FWD) ==========
 	// Kiểm tra: Node này có trong cùng cột không?
 	myPos, _ := h.gridManager.GetPeerPosition(h.host.ID())
 	if myPos.Col == int(msg.ColID) {
-		storeLog.Debugf("RDA|STORE|FORWARD_CHECK ✓ SAME_COL index=%d myCol=%d targetCol=%d", 
+		storeLog.Debugf("RDA|STORE|FORWARD_CHECK ✓ SAME_COL index=%d myCol=%d targetCol=%d",
 			msg.ShareIndex, myPos.Col, msg.ColID)
 		// YES: Phát loa cho TẤT CẢ láng giềng cùng cột
 		h.forwardToColumnPeers(msg)
 	} else {
-		storeLog.Debugf("RDA|STORE|FORWARD_CHECK ✗ DIFF_COL index=%d myCol=%d targetCol=%d (skip forward)", 
+		storeLog.Debugf("RDA|STORE|FORWARD_CHECK ✗ DIFF_COL index=%d myCol=%d targetCol=%d (skip forward)",
 			msg.ShareIndex, myPos.Col, msg.ColID)
 		// NO: Không forward - chỉ lưu cục bộ
 	}
 
 	latency := time.Since(storeStartTime).Milliseconds()
-	storeLog.Infof("RDA|STORE|PROCESS_END handle=%s index=%d latency=%dms", 
+	storeLog.Infof("RDA|STORE|PROCESS_END handle=%s index=%d latency=%dms",
 		msg.Handle[:8], msg.ShareIndex, latency)
 }
 
@@ -275,7 +276,7 @@ func (h *RDAStoreProtocolHandler) handleStoreFwdStream(stream network.Stream) {
 	}
 
 	startTime := time.Now()
-	storeLog.Debugf("[%s] Received STORE_FWD msg - h=%s, i=%d from column peer", 
+	storeLog.Debugf("[%s] Received STORE_FWD msg - h=%s, i=%d from column peer",
 		peerID.String()[:16], msg.Handle[:8], msg.ShareIndex)
 
 	// Process STORE_FWD
@@ -292,13 +293,13 @@ func (h *RDAStoreProtocolHandler) processStoreFwdMessage(senderAddr string, msg 
 
 	// ========== BƯỚC 1: VALIDATION ==========
 	symbol := &RDASymbol{
-		Handle:     msg.Handle,
-		ShareIndex: msg.ShareIndex,
-		Row:        msg.RowID,
-		Col:        msg.ColID,
-		ShareData:  msg.Data,
-		NMTProof:   *msg.NMTProof,
-		Timestamp:  msg.Timestamp,
+		Handle:      msg.Handle,
+		ShareIndex:  msg.ShareIndex,
+		Row:         msg.RowID,
+		Col:         msg.ColID,
+		ShareData:   msg.Data,
+		NMTProof:    *msg.NMTProof,
+		Timestamp:   msg.Timestamp,
 		BlockHeight: msg.BlockHeight,
 	}
 
@@ -312,6 +313,7 @@ func (h *RDAStoreProtocolHandler) processStoreFwdMessage(senderAddr string, msg 
 
 	// ========== BƯỚC 2: STORAGE ==========
 	rdaShare := &RDAShare{
+		Handle:   msg.Handle,
 		Row:      msg.RowID,
 		Col:      msg.ColID,
 		SymbolID: msg.ShareIndex,
@@ -340,16 +342,16 @@ func (h *RDAStoreProtocolHandler) processStoreFwdMessage(senderAddr string, msg 
 
 // RDAStoreProposer - Node gửi STORE messages (Bridge/Full nodes)
 type RDAStoreProposer struct {
-	host            host.Host
-	gridManager     *RDAGridManager
-	peerManager     *RDAPeerManager
-	myPosition      GridPosition
+	host             host.Host
+	gridManager      *RDAGridManager
+	peerManager      *RDAPeerManager
+	myPosition       GridPosition
 	predicateChecker *RDAPredicateChecker
 
-	mu                 sync.RWMutex
-	totalStoresSent    int64
-	successSends       int64
-	failedSends        int64
+	mu                  sync.RWMutex
+	totalStoresSent     int64
+	successSends        int64
+	failedSends         int64
 	totalBytesForwarded int64
 }
 
@@ -361,10 +363,10 @@ func NewRDAStoreProposer(
 ) *RDAStoreProposer {
 	myPos, _ := gridManager.GetPeerPosition(host.ID())
 	return &RDAStoreProposer{
-		host:            host,
-		gridManager:     gridManager,
-		peerManager:     peerManager,
-		myPosition:      myPos,
+		host:             host,
+		gridManager:      gridManager,
+		peerManager:      peerManager,
+		myPosition:       myPos,
 		predicateChecker: NewRDAPredicateChecker(uint32(gridManager.GetGridDimensions().Cols)),
 	}
 }
@@ -400,7 +402,7 @@ func (p *RDAStoreProposer) DistributeBlock(
 		// My Row = r
 		row := uint32(p.myPosition.Row)
 
-		storeLog.Debugf("PROPOSER - Processing share i=%d → col=%d (row=%d)", 
+		storeLog.Debugf("PROPOSER - Processing share i=%d → col=%d (row=%d)",
 			share.ShareIndex, col, row)
 
 		// ========== BƯỚC 2: TỚI PEERS TẠI (row, col) ==========
@@ -571,10 +573,10 @@ func (h *RDAStoreProtocolHandler) GetStoreStats() map[string]interface{} {
 	defer h.mu.RUnlock()
 
 	return map[string]interface{}{
-		"total_store_received":    h.totalStoreReceived,
-		"total_store_forwarded":   h.totalStoreForwarded,
+		"total_store_received":     h.totalStoreReceived,
+		"total_store_forwarded":    h.totalStoreForwarded,
 		"total_store_fwd_received": h.totalStoreFwdReceived,
-		"failed_validations":      h.failedValidations,
+		"failed_validations":       h.failedValidations,
 	}
 }
 

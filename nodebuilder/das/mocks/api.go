@@ -50,6 +50,36 @@ func (mr *MockModuleMockRecorder) SamplingStats(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SamplingStats", reflect.TypeOf((*MockModule)(nil).SamplingStats), arg0)
 }
 
+// RDADiagnostics mocks base method.
+func (m *MockModule) RDADiagnostics(arg0 context.Context) (das.RDADiagnosticsStatus, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RDADiagnostics", arg0)
+	ret0, _ := ret[0].(das.RDADiagnosticsStatus)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RDADiagnostics indicates an expected call of RDADiagnostics.
+func (mr *MockModuleMockRecorder) RDADiagnostics(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RDADiagnostics", reflect.TypeOf((*MockModule)(nil).RDADiagnostics), arg0)
+}
+
+// RuntimeMode mocks base method.
+func (m *MockModule) RuntimeMode(arg0 context.Context) (das.RuntimeModeStatus, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RuntimeMode", arg0)
+	ret0, _ := ret[0].(das.RuntimeModeStatus)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// RuntimeMode indicates an expected call of RuntimeMode.
+func (mr *MockModuleMockRecorder) RuntimeMode(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RuntimeMode", reflect.TypeOf((*MockModule)(nil).RuntimeMode), arg0)
+}
+
 // WaitCatchUp mocks base method.
 func (m *MockModule) WaitCatchUp(arg0 context.Context) error {
 	m.ctrl.T.Helper()

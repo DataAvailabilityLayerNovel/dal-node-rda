@@ -18,6 +18,9 @@ const (
 	jobTypeLabel     = "job_type"
 	headerWidthLabel = "header_width"
 	failedLabel      = "failed"
+	modeLabel        = "mode"
+	outcomeLabel     = "outcome"
+	fallbackLabel    = "fallback"
 )
 
 var meter = otel.Meter("das")
@@ -33,14 +36,28 @@ type metrics struct {
 	clientReg metric.Registration
 
 	// RDA-specific metrics
-	rdaMatrixDirect     metric.Float64Histogram // Direct matrix fetch latency
-	rdaErasureRecovery  metric.Int64Counter     // Successful erasure recoveries
-	rdaRecoveryLatency  metric.Float64Histogram // Recovery operation latency
-	rdaBandwidthSavings metric.Float64Gauge     // Bandwidth savings %
-	rdaThroughput       metric.Int64Counter     // Sampling operations/sec
+	rdaMatrixDirect             metric.Float64Histogram // Direct matrix fetch latency
+	rdaErasureRecovery          metric.Int64Counter     // Successful erasure recoveries
+	rdaRecoveryLatency          metric.Float64Histogram // Recovery operation latency
+	rdaBandwidthSavings         metric.Float64Gauge     // Bandwidth savings %
+	rdaThroughput               metric.Int64Counter     // Sampling operations/sec
+	rdaDirectHits               metric.Int64Counter
+	rdaFallbackHits             metric.Int64Counter
+	rdaGetRequestTotal          metric.Int64Counter
+	rdaGetSuccessTotal          metric.Int64Counter
+	rdaGetTimeoutTotal          metric.Int64Counter
+	rdaSyncRequestTotal         metric.Int64Counter
+	rdaSyncSymbolsReceivedTotal metric.Int64Counter
+	rdaPredValidationFailTotal  metric.Int64Counter
 }
 
 func (d *DASer) InitMetrics() error {
+	if d.sampler != nil && d.sampler.metrics != nil {
+		if err := d.sampler.metrics.close(); err != nil {
+			return fmt.Errorf("closing previous metrics registration: %w", err)
+		}
+	}
+
 	sampled, err := meter.Int64Counter("das_sampled_headers_counter",
 		metric.WithDescription("sampled headers counter"))
 	if err != nil {
@@ -139,6 +156,92 @@ func (d *DASer) InitMetrics() error {
 	}
 	d.sampler.metrics.rdaThroughput = rdaThroughput
 
+	rdaDirectHits, err := meter.Int64Counter("das_rda_direct_hits_total",
+		metric.WithDescription("Total successful RDA direct hits"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaDirectHits = rdaDirectHits
+
+	rdaFallbackHits, err := meter.Int64Counter("das_rda_fallback_hits_total",
+		metric.WithDescription("Total successful classic fallback hits after RDA failure"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaFallbackHits = rdaFallbackHits
+
+	rdaGetRequestTotal, err := meter.Int64Counter("rda_get_request_total",
+		metric.WithDescription("Total RDA GET requests attempted"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaGetRequestTotal = rdaGetRequestTotal
+
+	rdaGetSuccessTotal, err := meter.Int64Counter("rda_get_success_total",
+		metric.WithDescription("Total successful RDA GET requests"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaGetSuccessTotal = rdaGetSuccessTotal
+
+	rdaGetTimeoutTotal, err := meter.Int64Counter("rda_get_timeout_total",
+		metric.WithDescription("Total timed out RDA GET requests"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaGetTimeoutTotal = rdaGetTimeoutTotal
+
+	rdaSyncRequestTotal, err := meter.Int64Counter("rda_sync_request_total",
+		metric.WithDescription("Total RDA SYNC requests attempted"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaSyncRequestTotal = rdaSyncRequestTotal
+
+	rdaSyncSymbolsReceivedTotal, err := meter.Int64Counter("rda_sync_symbols_received_total",
+		metric.WithDescription("Total symbols received by RDA SYNC"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaSyncSymbolsReceivedTotal = rdaSyncSymbolsReceivedTotal
+
+	rdaPredValidationFailTotal, err := meter.Int64Counter("rda_pred_validation_fail_total",
+		metric.WithDescription("Total RDA predicate validation failures"))
+	if err != nil {
+		return err
+	}
+	d.sampler.metrics.rdaPredValidationFailTotal = rdaPredValidationFailTotal
+
+	rdaQuerySuccessRatio, err := meter.Float64ObservableGauge("rda_query_success_ratio",
+		metric.WithDescription("RDA GET success ratio [0,1]"))
+	if err != nil {
+		return err
+	}
+
+	rdaFallbackRatio, err := meter.Float64ObservableGauge("rda_fallback_ratio",
+		metric.WithDescription("RDA fallback ratio [0,1]"))
+	if err != nil {
+		return err
+	}
+
+	retryDepthLow, err := meter.Int64ObservableGauge("rda_retry_depth_bucket_low",
+		metric.WithDescription("Failed headers with retry depth <= 1"))
+	if err != nil {
+		return err
+	}
+
+	retryDepthMid, err := meter.Int64ObservableGauge("rda_retry_depth_bucket_mid",
+		metric.WithDescription("Failed headers with retry depth in [2,3]"))
+	if err != nil {
+		return err
+	}
+
+	retryDepthHigh, err := meter.Int64ObservableGauge("rda_retry_depth_bucket_high",
+		metric.WithDescription("Failed headers with retry depth >= 4"))
+	if err != nil {
+		return err
+	}
+
 	callback := func(ctx context.Context, observer metric.Observer) error {
 		stats, err := d.sampler.stats(ctx)
 		if err != nil {
@@ -161,6 +264,34 @@ func (d *DASer) InitMetrics() error {
 		}
 
 		observer.ObserveInt64(totalSampled, int64(stats.totalSampled()))
+
+		requests := d.rdaGetRequests.Load()
+		successes := d.rdaGetSuccesses.Load()
+		if requests > 0 {
+			observer.ObserveFloat64(rdaQuerySuccessRatio, float64(successes)/float64(requests))
+		}
+
+		directHits := d.rdaDirectHits.Load()
+		fallbackHits := d.rdaFallbackHits.Load()
+		totalOutcomes := directHits + fallbackHits
+		if totalOutcomes > 0 {
+			observer.ObserveFloat64(rdaFallbackRatio, float64(fallbackHits)/float64(totalOutcomes))
+		}
+
+		var lowDepth, midDepth, highDepth int64
+		for _, attempts := range stats.Failed {
+			switch {
+			case attempts <= 1:
+				lowDepth++
+			case attempts <= 3:
+				midDepth++
+			default:
+				highDepth++
+			}
+		}
+		observer.ObserveInt64(retryDepthLow, lowDepth)
+		observer.ObserveInt64(retryDepthMid, midDepth)
+		observer.ObserveInt64(retryDepthHigh, highDepth)
 		return nil
 	}
 
@@ -170,6 +301,11 @@ func (d *DASer) InitMetrics() error {
 		networkHead,
 		sampledChainHead,
 		totalSampled,
+		rdaQuerySuccessRatio,
+		rdaFallbackRatio,
+		retryDepthLow,
+		retryDepthMid,
+		retryDepthHigh,
 	)
 	if err != nil {
 		return fmt.Errorf("registering metrics callback: %w", err)
@@ -180,6 +316,9 @@ func (d *DASer) InitMetrics() error {
 
 func (m *metrics) close() error {
 	if m == nil {
+		return nil
+	}
+	if m.clientReg == nil {
 		return nil
 	}
 	return m.clientReg.Unregister()
@@ -236,7 +375,7 @@ func (m *metrics) observeNewHead(ctx context.Context) {
 }
 
 // observeRDAMatrixDirectFetch records direct fetch latency within RDA matrix
-func (m *metrics) observeRDAMatrixDirectFetch(ctx context.Context, latencyMs float64) {
+func (m *metrics) observeRDAMatrixDirectFetch(ctx context.Context, latencyMs float64, mode Mode, outcome string) {
 	if m == nil || m.rdaMatrixDirect == nil {
 		return
 	}
@@ -244,6 +383,8 @@ func (m *metrics) observeRDAMatrixDirectFetch(ctx context.Context, latencyMs flo
 	m.rdaMatrixDirect.Record(ctx, latencyMs,
 		metric.WithAttributes(
 			attribute.String("fetch_type", "rda_direct"),
+			attribute.String(modeLabel, string(mode)),
+			attribute.String(outcomeLabel, outcome),
 		))
 }
 
@@ -284,7 +425,7 @@ func (m *metrics) updateRDABandwidthSavings(ctx context.Context, savingsPercent 
 }
 
 // recordRDASamplingOperation records a completed RDA sampling operation
-func (m *metrics) recordRDASamplingOperation(ctx context.Context) {
+func (m *metrics) recordRDASamplingOperation(ctx context.Context, mode Mode, outcome string) {
 	if m == nil || m.rdaThroughput == nil {
 		return
 	}
@@ -292,5 +433,102 @@ func (m *metrics) recordRDASamplingOperation(ctx context.Context) {
 	m.rdaThroughput.Add(ctx, 1,
 		metric.WithAttributes(
 			attribute.String("sample_type", "rda_matrix"),
+			attribute.String(modeLabel, string(mode)),
+			attribute.String(outcomeLabel, outcome),
+		))
+}
+
+func (m *metrics) recordRDADirectHit(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaDirectHits == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaDirectHits.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+			attribute.String(outcomeLabel, "success"),
+			attribute.Bool(fallbackLabel, false),
+		))
+}
+
+func (m *metrics) recordRDAFallbackHit(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaFallbackHits == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaFallbackHits.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+			attribute.String(outcomeLabel, "success"),
+			attribute.Bool(fallbackLabel, true),
+		))
+}
+
+func (m *metrics) recordRDAGetRequest(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaGetRequestTotal == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaGetRequestTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+		))
+}
+
+func (m *metrics) recordRDAGetSuccess(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaGetSuccessTotal == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaGetSuccessTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+		))
+}
+
+func (m *metrics) recordRDAGetTimeout(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaGetTimeoutTotal == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaGetTimeoutTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+		))
+}
+
+func (m *metrics) recordRDASyncRequest(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaSyncRequestTotal == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaSyncRequestTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+		))
+}
+
+func (m *metrics) recordRDASyncSymbolsReceived(ctx context.Context, mode Mode, symbols int64) {
+	if m == nil || m.rdaSyncSymbolsReceivedTotal == nil {
+		return
+	}
+	if symbols <= 0 {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaSyncSymbolsReceivedTotal.Add(ctx, symbols,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
+		))
+}
+
+func (m *metrics) recordRDAPredValidationFail(ctx context.Context, mode Mode) {
+	if m == nil || m.rdaPredValidationFailTotal == nil {
+		return
+	}
+	ctx = utils.ResetContextOnError(ctx)
+	m.rdaPredValidationFailTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String(modeLabel, string(mode)),
 		))
 }

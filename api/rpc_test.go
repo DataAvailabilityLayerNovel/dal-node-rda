@@ -229,8 +229,48 @@ func TestAuthedRPC(t *testing.T) {
 				stats, err := rpcClient.DAS.SamplingStats(ctx)
 				require.NoError(t, err)
 				require.Equal(t, expected, stats)
+
+				server.Das.EXPECT().WaitCatchUp(gomock.Any()).Return(nil)
+				err = rpcClient.DAS.WaitCatchUp(ctx)
+				require.NoError(t, err)
+
+				expectedDiagnostics := daspkg.RDADiagnosticsStatus{
+					RuntimeModeStatus: daspkg.RuntimeModeStatus{
+						RDADefinition:  "Robust Distributed Array",
+						Mode:           daspkg.ModeHybrid,
+						FallbackActive: true,
+					},
+					GetRequestTotal:   10,
+					GetSuccessTotal:   8,
+					GetTimeoutTotal:   2,
+					QuerySuccessRatio: 0.8,
+					FallbackRatio:     0.2,
+				}
+				server.Das.EXPECT().RDADiagnostics(gomock.Any()).Return(expectedDiagnostics, nil)
+				diagnostics, err := rpcClient.DAS.RDADiagnostics(ctx)
+				require.NoError(t, err)
+				require.Equal(t, expectedDiagnostics, diagnostics)
+
+				expectedMode := daspkg.RuntimeModeStatus{
+					RDADefinition:  "Robust Distributed Array",
+					Mode:           daspkg.ModeHybrid,
+					FallbackActive: true,
+				}
+				server.Das.EXPECT().RuntimeMode(gomock.Any()).Return(expectedMode, nil)
+				mode, err := rpcClient.DAS.RuntimeMode(ctx)
+				require.NoError(t, err)
+				require.Equal(t, expectedMode, mode)
 			} else {
 				_, err := rpcClient.DAS.SamplingStats(ctx)
+				require.Error(t, err)
+				require.ErrorContains(t, err, "missing permission")
+				err = rpcClient.DAS.WaitCatchUp(ctx)
+				require.Error(t, err)
+				require.ErrorContains(t, err, "missing permission")
+				_, err = rpcClient.DAS.RDADiagnostics(ctx)
+				require.Error(t, err)
+				require.ErrorContains(t, err, "missing permission")
+				_, err = rpcClient.DAS.RuntimeMode(ctx)
 				require.Error(t, err)
 				require.ErrorContains(t, err, "missing permission")
 			}

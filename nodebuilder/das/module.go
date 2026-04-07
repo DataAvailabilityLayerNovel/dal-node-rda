@@ -24,6 +24,17 @@ func ConstructModule(cfg *Config) fx.Option {
 		fx.Provide(
 			func(c Config) []das.Option {
 				return []das.Option{
+					das.WithMode(c.Mode),
+					das.WithRDAQueryTimeout(c.RDAQueryTimeout),
+					das.WithRDAMaxRetries(c.RDAMaxRetries),
+					das.WithRDAParallelQueries(c.RDAParallelQueries),
+					das.WithRDAFallbackEnabled(c.RDAFallbackEnabled),
+					das.WithRDAFallbackAfterRetries(c.RDAFallbackAfterRetries),
+					das.WithRDASyncOnCatchup(c.RDASyncOnCatchup),
+					das.WithRDAModeStrictPredicate(c.RDAModeStrictPredicate),
+					das.WithRDAMinPeersPerSubnet(c.RDAMinPeersPerSubnet),
+					das.WithRDASyncBatchSize(c.RDASyncBatchSize),
+					das.WithRDACheckpointVersion(c.RDACheckpointVersion),
 					das.WithSamplingRange(c.SamplingRange),
 					das.WithConcurrencyLimit(c.ConcurrencyLimit),
 					das.WithBackgroundStoreInterval(c.BackgroundStoreInterval),

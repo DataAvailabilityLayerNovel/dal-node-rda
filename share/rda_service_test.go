@@ -6,6 +6,14 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+type lifecycleReadyStub struct {
+	ready bool
+}
+
+func (l lifecycleReadyStub) IsSubnetReady() bool {
+	return l.ready
+}
+
 // Test_DefaultRDANodeServiceConfig returns correct defaults
 func Test_DefaultRDANodeServiceConfig(t *testing.T) {
 	config := DefaultRDANodeServiceConfig()
@@ -147,4 +155,22 @@ func Test_ConfigConsistency(t *testing.T) {
 	assert.Greater(t, config.FilterPolicy.MaxRowPeers, 0)
 	assert.Greater(t, config.ExpectedNodeCount, uint32(0))
 	assert.True(t, config.EnableDetailedLogging)
+}
+
+func TestRDANodeService_IsSubnetDiscoveryReady_NonSubnetMode(t *testing.T) {
+	service := &RDANodeService{useSubnetDiscovery: false}
+	assert.True(t, service.IsSubnetDiscoveryReady())
+}
+
+func TestRDANodeService_IsSubnetDiscoveryReady_NoLifecycle(t *testing.T) {
+	service := &RDANodeService{useSubnetDiscovery: true}
+	assert.True(t, service.IsSubnetDiscoveryReady())
+}
+
+func TestRDANodeService_IsSubnetDiscoveryReady_WithLifecycle(t *testing.T) {
+	service := &RDANodeService{useSubnetDiscovery: true, lifecycle: lifecycleReadyStub{ready: false}}
+	assert.False(t, service.IsSubnetDiscoveryReady())
+
+	service.lifecycle = lifecycleReadyStub{ready: true}
+	assert.True(t, service.IsSubnetDiscoveryReady())
 }

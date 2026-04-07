@@ -65,8 +65,9 @@ func newWorker(j job,
 		state: workerState{
 			curr: j.from,
 			result: result{
-				job:    j,
-				failed: make(map[uint64]int),
+				job:           j,
+				failed:        make(map[uint64]int),
+				failedDetails: make(map[uint64]failedUnitInfo),
 			},
 		},
 	}
@@ -207,6 +208,7 @@ func (w *worker) setResult(curr uint64, err error) {
 	defer w.lock.Unlock()
 	if err != nil {
 		w.state.failed[curr]++
+		w.state.failedDetails[curr] = buildFailedUnitInfo(err)
 		w.state.err = errors.Join(w.state.err, fmt.Errorf("height: %d, err: %w", curr, err))
 	}
 	w.state.curr = curr

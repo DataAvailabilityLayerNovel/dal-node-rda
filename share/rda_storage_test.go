@@ -282,6 +282,92 @@ func TestRDAStorage_Stats(t *testing.T) {
 	t.Log("✓ Test PASSED: Statistics correct\n")
 }
 
+func TestRDAStorage_GetShareByHandleAndSymbol(t *testing.T) {
+	config := RDAStorageConfig{MyRow: 0, MyCol: 5, GridSize: 256}
+	storage := NewRDAStorage(config)
+	ctx := context.Background()
+
+	share := &RDAShare{
+		Handle:   "handle-A",
+		Row:      2,
+		Col:      5,
+		SymbolID: 2*256 + 5,
+		Data:     []byte("payload-A"),
+		Height:   101,
+	}
+	require.NoError(t, storage.StoreShare(ctx, share))
+
+	data, height, row, col, err := storage.GetShareByHandleAndSymbol(ctx, "handle-A", share.SymbolID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload-A"), data)
+	require.Equal(t, uint64(101), height)
+	require.Equal(t, uint32(2), row)
+	require.Equal(t, uint32(5), col)
+}
+
+func TestRDAStorage_GetShareByHandleAndSymbol_FallbackScan(t *testing.T) {
+	config := RDAStorageConfig{MyRow: 0, MyCol: 3, GridSize: 256}
+	storage := NewRDAStorage(config)
+	ctx := context.Background()
+
+	share := &RDAShare{
+		Row:      1,
+		Col:      3,
+		SymbolID: 1*256 + 3,
+		Data:     []byte("payload-fallback"),
+		Height:   200,
+	}
+	require.NoError(t, storage.StoreShare(ctx, share))
+
+	data, height, row, col, err := storage.GetShareByHandleAndSymbol(ctx, "unknown-handle", share.SymbolID)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload-fallback"), data)
+	require.Equal(t, uint64(200), height)
+	require.Equal(t, uint32(1), row)
+	require.Equal(t, uint32(3), col)
+}
+
+func TestRDAStorage_GetLatestHeightForHandleAndSymbol_Strict(t *testing.T) {
+	config := RDAStorageConfig{MyRow: 0, MyCol: 5, GridSize: 256}
+	storage := NewRDAStorage(config)
+	ctx := context.Background()
+
+	require.NoError(t, storage.StoreShare(ctx, &RDAShare{
+		Handle:   "handle-A",
+		Row:      2,
+		Col:      5,
+		SymbolID: 2*256 + 5,
+		Data:     []byte("hA-100"),
+		Height:   100,
+	}))
+	require.NoError(t, storage.StoreShare(ctx, &RDAShare{
+		Handle:   "handle-A",
+		Row:      2,
+		Col:      5,
+		SymbolID: 2*256 + 5,
+		Data:     []byte("hA-200"),
+		Height:   200,
+	}))
+	require.NoError(t, storage.StoreShare(ctx, &RDAShare{
+		Handle:   "handle-B",
+		Row:      2,
+		Col:      5,
+		SymbolID: 2*256 + 5,
+		Data:     []byte("hB-300"),
+		Height:   300,
+	}))
+
+	height, exists, err := storage.GetLatestHeightForHandleAndSymbol(ctx, "handle-A", 2*256+5)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.Equal(t, uint64(200), height)
+
+	height, exists, err = storage.GetLatestHeightForHandleAndSymbol(ctx, "handle-C", 2*256+5)
+	require.NoError(t, err)
+	require.False(t, exists)
+	require.Equal(t, uint64(0), height)
+}
+
 // TestRDAStorage_GridPositionValidation tests grid position bounds checking
 func TestRDAStorage_GridPositionValidation(t *testing.T) {
 	t.Log("========== TEST: Grid Position Validation ==========")

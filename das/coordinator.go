@@ -37,8 +37,9 @@ type samplingCoordinator struct {
 // result will carry errors to coordinator after worker finishes the job
 type result struct {
 	job
-	failed map[uint64]int
-	err    error
+	failed        map[uint64]int
+	failedDetails map[uint64]failedUnitInfo
+	err           error
 }
 
 func newSamplingCoordinator(
@@ -70,12 +71,21 @@ func (sc *samplingCoordinator) run(ctx context.Context, cp checkpoint) {
 	}
 
 	for {
-		for !sc.concurrencyLimitReached() {
+		for !sc.nonRecentConcurrencyLimitReached() {
 			next, found := sc.state.nextJob()
 			if !found {
 				break
 			}
 			sc.runWorker(ctx, next)
+		}
+
+		var retryWakeUp <-chan time.Time
+		if wait, ok := sc.state.nextRetryDelay(); ok {
+			if wait <= 0 {
+				retryWakeUp = time.After(time.Millisecond)
+			} else {
+				retryWakeUp = time.After(wait)
+			}
 		}
 
 		select {
@@ -90,6 +100,8 @@ func (sc *samplingCoordinator) run(ctx context.Context, cp checkpoint) {
 			}
 		case res := <-sc.resultCh:
 			sc.state.handleResult(res)
+		case <-retryWakeUp:
+			// retry backoff elapsed; continue loop to schedule eligible retry jobs
 		case wg := <-sc.waitCh:
 			wg.Wait()
 		case <-ctx.Done():
@@ -98,6 +110,23 @@ func (sc *samplingCoordinator) run(ctx context.Context, cp checkpoint) {
 			return
 		}
 	}
+}
+
+// nonRecentConcurrencyLimitReached indicates whether catchup/retry workers filled the budget,
+// leaving a slot for recent jobs when concurrency is larger than 1.
+func (sc *samplingCoordinator) nonRecentConcurrencyLimitReached() bool {
+	if sc.concurrencyLimit <= 1 {
+		return len(sc.state.inProgress) >= sc.concurrencyLimit
+	}
+
+	nonRecent := 0
+	for _, getState := range sc.state.inProgress {
+		if getState().jobType != recentJob {
+			nonRecent++
+		}
+	}
+
+	return nonRecent >= sc.concurrencyLimit-1
 }
 
 // runWorker runs job in separate worker go-routine
@@ -137,11 +166,17 @@ func (sc *samplingCoordinator) stats(ctx context.Context) (SamplingStats, error)
 }
 
 func (sc *samplingCoordinator) getCheckpoint(ctx context.Context) (checkpoint, error) {
-	stats, err := sc.stats(ctx)
-	if err != nil {
-		return checkpoint{}, err
+	var wg sync.WaitGroup
+	wg.Add(1)
+	defer wg.Done()
+
+	select {
+	case sc.waitCh <- &wg:
+	case <-ctx.Done():
+		return checkpoint{}, ctx.Err()
 	}
-	return newCheckpoint(stats), nil
+
+	return sc.state.snapshotCheckpoint(), nil
 }
 
 // concurrencyLimitReached indicates whether concurrencyLimit has been reached

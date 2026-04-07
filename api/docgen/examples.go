@@ -43,6 +43,9 @@ var (
 	//go:embed "exampledata/samplingStats.json"
 	exampleSamplingStats string
 
+	//go:embed "exampledata/rdaDiagnostics.json"
+	exampleRDADiagnostics string
+
 	//go:embed "exampledata/txResponse.json"
 	exampleTxResponse string
 
@@ -119,6 +122,13 @@ func init() {
 		panic(err)
 	}
 	add(samplingStats)
+
+	var rdaDiagnostics das.RDADiagnosticsStatus
+	err = json.Unmarshal([]byte(exampleRDADiagnostics), &rdaDiagnostics)
+	if err != nil {
+		panic(err)
+	}
+	add(rdaDiagnostics)
 
 	var extendedHeader *header.ExtendedHeader
 	err = json.Unmarshal([]byte(exampleExtendedHeader), &extendedHeader)

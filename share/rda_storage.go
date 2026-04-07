@@ -3,6 +3,7 @@ package share
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	logging "github.com/ipfs/go-log/v2"
@@ -19,6 +20,7 @@ type RDAStorageConfig struct {
 
 // RDAShare represents a single symbol in the RDA grid
 type RDAShare struct {
+	Handle   string // Data root / block handle
 	Row      uint32 // 0 to K-1
 	Col      uint32 // 0 to K-1
 	SymbolID uint32 // 0 to K²-1
@@ -38,7 +40,11 @@ type RDAStorage struct {
 	// columnShares stores ALL shares from this node's column
 	// Access: [blockHeight][row][symbolID] → share data
 	columnShares map[uint64]map[uint32]map[uint32][]byte
-	mu           sync.RWMutex
+
+	// handleHeights indexes known heights by handle for direct GET lookups.
+	// Access: [handle][height] -> exists
+	handleHeights map[string]map[uint64]struct{}
+	mu            sync.RWMutex
 
 	// Metrics
 	sharesStored    int64
@@ -53,8 +59,9 @@ func NewRDAStorage(config RDAStorageConfig) *RDAStorage {
 	)
 
 	return &RDAStorage{
-		config:       config,
-		columnShares: make(map[uint64]map[uint32]map[uint32][]byte),
+		config:        config,
+		columnShares:  make(map[uint64]map[uint32]map[uint32][]byte),
+		handleHeights: make(map[string]map[uint64]struct{}),
 	}
 }
 
@@ -176,6 +183,12 @@ func (s *RDAStorage) StoreShare(ctx context.Context, share *RDAShare) error {
 
 	// Store the share
 	s.columnShares[share.Height][share.Row][share.SymbolID] = share.Data
+	if share.Handle != "" {
+		if _, ok := s.handleHeights[share.Handle]; !ok {
+			s.handleHeights[share.Handle] = make(map[uint64]struct{})
+		}
+		s.handleHeights[share.Handle][share.Height] = struct{}{}
+	}
 	s.sharesStored++
 
 	rdaStorageLog.Infof(
@@ -267,6 +280,114 @@ func (s *RDAStorage) GetShare(ctx context.Context, height uint64, row, col, symb
 	return data, nil
 }
 
+// GetShareByHandleAndSymbol retrieves share bytes and real block height using handle+symbol index.
+// If handle is unknown, this falls back to scanning all known heights for compatibility.
+func (s *RDAStorage) GetShareByHandleAndSymbol(ctx context.Context, handle string, symbolID uint32) ([]byte, uint64, uint32, uint32, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, 0, 0, err
+	}
+
+	if err := s.VerifySymbolToColumnMapping(symbolID); err != nil {
+		return nil, 0, 0, 0, err
+	}
+
+	col := symbolID % s.config.GridSize
+	row := symbolID / s.config.GridSize
+
+	tryHeight := func(height uint64) ([]byte, bool) {
+		heightMap, heightExists := s.columnShares[height]
+		if !heightExists {
+			return nil, false
+		}
+		rowMap, rowExists := heightMap[row]
+		if !rowExists {
+			return nil, false
+		}
+		data, ok := rowMap[symbolID]
+		return data, ok
+	}
+
+	if handle != "" {
+		if heights, ok := s.handleHeights[handle]; ok {
+			orderedHeights := make([]uint64, 0, len(heights))
+			for h := range heights {
+				orderedHeights = append(orderedHeights, h)
+			}
+			sort.Slice(orderedHeights, func(i, j int) bool { return orderedHeights[i] > orderedHeights[j] })
+			for _, h := range orderedHeights {
+				if data, ok := tryHeight(h); ok {
+					s.sharesRetrieved++
+					return data, h, row, col, nil
+				}
+			}
+		}
+	}
+
+	allHeights := make([]uint64, 0, len(s.columnShares))
+	for h := range s.columnShares {
+		allHeights = append(allHeights, h)
+	}
+	sort.Slice(allHeights, func(i, j int) bool { return allHeights[i] > allHeights[j] })
+	for _, h := range allHeights {
+		if data, ok := tryHeight(h); ok {
+			s.sharesRetrieved++
+			return data, h, row, col, nil
+		}
+	}
+
+	return nil, 0, 0, 0, fmt.Errorf("symbol %d not found for handle %q", symbolID, handle)
+}
+
+// GetLatestHeightForHandleAndSymbol returns latest known height for a specific handle+symbol pair.
+// This method is strict: it does not fallback to other handles.
+func (s *RDAStorage) GetLatestHeightForHandleAndSymbol(ctx context.Context, handle string, symbolID uint32) (uint64, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+
+	if handle == "" {
+		return 0, false, fmt.Errorf("handle is required")
+	}
+
+	if err := s.VerifySymbolToColumnMapping(symbolID); err != nil {
+		return 0, false, err
+	}
+
+	heightSet, ok := s.handleHeights[handle]
+	if !ok || len(heightSet) == 0 {
+		return 0, false, nil
+	}
+
+	row := symbolID / s.config.GridSize
+	orderedHeights := make([]uint64, 0, len(heightSet))
+	for h := range heightSet {
+		orderedHeights = append(orderedHeights, h)
+	}
+	sort.Slice(orderedHeights, func(i, j int) bool { return orderedHeights[i] > orderedHeights[j] })
+
+	for _, h := range orderedHeights {
+		heightMap, ok := s.columnShares[h]
+		if !ok {
+			continue
+		}
+		rowMap, ok := heightMap[row]
+		if !ok {
+			continue
+		}
+		if _, ok := rowMap[symbolID]; ok {
+			return h, true, nil
+		}
+	}
+
+	return 0, false, nil
+}
+
 // GetAllSharesForHeight returns all shares stored for a given height in this column
 func (s *RDAStorage) GetAllSharesForHeight(ctx context.Context, height uint64) (map[uint32]map[uint32][]byte, error) {
 	s.mu.RLock()
@@ -301,6 +422,119 @@ func (s *RDAStorage) GetAllSharesForHeight(ctx context.Context, height uint64) (
 	)
 
 	return result, nil
+}
+
+// GetLatestHeight returns the latest block height available in local column storage.
+func (s *RDAStorage) GetLatestHeight(ctx context.Context) (uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	if len(s.columnShares) == 0 {
+		return 0, fmt.Errorf("no shares available")
+	}
+
+	var latest uint64
+	for h := range s.columnShares {
+		if h > latest {
+			latest = h
+		}
+	}
+
+	return latest, nil
+}
+
+// ListColumnSharesSince returns deterministic shares for this node column from sinceHeight.
+// Results are ordered by height asc, row asc, symbol asc and capped by limit.
+func (s *RDAStorage) ListColumnSharesSince(
+	ctx context.Context,
+	col uint32,
+	sinceHeight uint64,
+	limit int,
+) ([]SyncShareData, uint64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	if col != s.config.MyCol {
+		return nil, 0, fmt.Errorf("node is column %d, cannot scan column %d", s.config.MyCol, col)
+	}
+
+	if limit <= 0 {
+		limit = MaxSharesPerSync
+	}
+
+	heights := make([]uint64, 0, len(s.columnShares))
+	var latest uint64
+	for h := range s.columnShares {
+		if h > latest {
+			latest = h
+		}
+		if h >= sinceHeight {
+			heights = append(heights, h)
+		}
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+
+	handlesByHeight := make(map[uint64][]string)
+	for handle, heightSet := range s.handleHeights {
+		for h := range heightSet {
+			if h >= sinceHeight {
+				handlesByHeight[h] = append(handlesByHeight[h], handle)
+			}
+		}
+	}
+	for h := range handlesByHeight {
+		sort.Strings(handlesByHeight[h])
+	}
+
+	result := make([]SyncShareData, 0, limit)
+	for _, h := range heights {
+		rowMap := s.columnShares[h]
+		rows := make([]uint32, 0, len(rowMap))
+		for r := range rowMap {
+			rows = append(rows, r)
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i] < rows[j] })
+
+		for _, row := range rows {
+			symbolMap := rowMap[row]
+			symbolIDs := make([]uint32, 0, len(symbolMap))
+			for symbolID := range symbolMap {
+				symbolIDs = append(symbolIDs, symbolID)
+			}
+			sort.Slice(symbolIDs, func(i, j int) bool { return symbolIDs[i] < symbolIDs[j] })
+
+			for _, symbolID := range symbolIDs {
+				handle := ""
+				if handles := handlesByHeight[h]; len(handles) > 0 {
+					handle = handles[0]
+				}
+
+				data := append([]byte(nil), symbolMap[symbolID]...)
+				result = append(result, SyncShareData{
+					Handle:     handle,
+					ShareIndex: symbolID,
+					Row:        row,
+					Col:        col,
+					Data:       data,
+					Height:     h,
+				})
+
+				if len(result) >= limit {
+					return result, latest, nil
+				}
+			}
+		}
+	}
+
+	return result, latest, nil
 }
 
 // GetStats returns storage statistics

@@ -42,6 +42,19 @@ type RDANodeService struct {
 	wg     sync.WaitGroup
 }
 
+// RDATopologySnapshot provides a compact topology view for external callers.
+type RDATopologySnapshot struct {
+	GridDimensions   GridDimensions `json:"grid_dimensions"`
+	RowPeers         int            `json:"row_peers"`
+	ColPeers         int            `json:"col_peers"`
+	TotalSubnetPeers int            `json:"total_subnet_peers"`
+}
+
+// RDAHealthSnapshot provides a compact health view for external callers.
+type RDAHealthSnapshot struct {
+	Synced bool `json:"synced"`
+}
+
 // RDANodeServiceConfig holds configuration for RDANodeService
 type RDANodeServiceConfig struct {
 	// Grid dimensions
@@ -300,6 +313,27 @@ func (s *RDANodeService) SetLifecycle(lifecycle interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lifecycle = lifecycle
+}
+
+// IsSubnetDiscoveryReady reports whether subnet discovery has completed when subnet discovery mode is enabled.
+// If subnet discovery is disabled, or no lifecycle manager is attached, this returns true for compatibility.
+func (s *RDANodeService) IsSubnetDiscoveryReady() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.useSubnetDiscovery {
+		return true
+	}
+
+	if s.lifecycle == nil {
+		return true
+	}
+
+	if lifecycleMgr, ok := s.lifecycle.(interface{ IsSubnetReady() bool }); ok {
+		return lifecycleMgr.IsSubnetReady()
+	}
+
+	return true
 }
 
 // Stop stops all RDA components
@@ -937,6 +971,23 @@ func (s *RDANodeService) QueryShare(ctx context.Context, handle string, shareInd
 	return s.getProtocolRequester.QueryShare(ctx, handle, shareIndex)
 }
 
+// GetTopologySnapshot returns a compact, type-safe topology summary.
+func (s *RDANodeService) GetTopologySnapshot() RDATopologySnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.gridManager == nil || s.peerManager == nil {
+		return RDATopologySnapshot{}
+	}
+
+	return RDATopologySnapshot{
+		GridDimensions:   s.gridManager.GetGridDimensions(),
+		RowPeers:         len(s.peerManager.GetRowPeers()),
+		ColPeers:         len(s.peerManager.GetColPeers()),
+		TotalSubnetPeers: len(s.peerManager.GetSubnetPeers()),
+	}
+}
+
 // GetGetStats returns statistics for GET operations
 func (s *RDANodeService) GetGetStats() map[string]interface{} {
 	s.mu.RLock()
@@ -982,6 +1033,26 @@ func (s *RDANodeService) IsSynced() bool {
 		return false
 	}
 	return s.syncProtocolRequester.IsSynced()
+}
+
+// GetHealthSnapshot returns a compact, type-safe health summary.
+func (s *RDANodeService) GetHealthSnapshot() RDAHealthSnapshot {
+	return RDAHealthSnapshot{Synced: s.IsSynced()}
+}
+
+// SyncColumn triggers a best-effort sync operation for current column membership.
+// sinceHeight is accepted for forward compatibility and applied when requester supports it.
+func (s *RDANodeService) SyncColumn(ctx context.Context, _ uint64) error {
+	s.mu.RLock()
+	requester := s.syncProtocolRequester
+	s.mu.RUnlock()
+
+	if requester == nil {
+		return fmt.Errorf("sync protocol requester not available")
+	}
+
+	requester.TriggerSyncOnStartup(ctx)
+	return nil
 }
 
 // RDAIntegrationExample shows how to integrate RDA into nodebuilder

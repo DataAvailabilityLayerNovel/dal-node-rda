@@ -181,6 +181,141 @@ func TestCoordinator(t *testing.T) {
 		assert.Equal(t, sampler.finalState(), newCheckpoint(coordinator.state.unsafeStats()))
 	})
 
+	t.Run("recent headers are admitted when catchup workers saturate non recent budget", func(t *testing.T) {
+		testParams := defaultTestParams()
+		testParams.dasParams.ConcurrencyLimit = 4
+		testParams.dasParams.SamplingRange = 1
+		testParams.dasParams.SampleTimeout = time.Hour
+
+		ctx, cancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
+		defer cancel()
+
+		recentHeight := uint64(100)
+		waitCh := make(chan struct{})
+		startedCh := make(chan uint64, 16)
+
+		sampleFn := func(ctx context.Context, h *header.ExtendedHeader) error {
+			select {
+			case startedCh <- h.Height():
+			default:
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-waitCh:
+				return nil
+			}
+		}
+
+		coordinator := newSamplingCoordinator(
+			testParams.dasParams,
+			getterStub{},
+			sampleFn,
+			newBroadcastMock(1),
+		)
+
+		nonRecentBudget := testParams.dasParams.ConcurrencyLimit - 1
+		cp := checkpoint{
+			SampleFrom:  1,
+			NetworkHead: 20,
+			Failed:      map[uint64]int{},
+			Workers:     []workerCheckpoint{},
+		}
+
+		go coordinator.run(ctx, cp)
+
+		started := 0
+		for started < nonRecentBudget {
+			select {
+			case <-ctx.Done():
+				require.FailNow(t, "retry workers did not start before timeout", "expected non-recent starts: %d", nonRecentBudget)
+			case h := <-startedCh:
+				if h != recentHeight {
+					started++
+				}
+			}
+		}
+
+		coordinator.listen(ctx, &header.ExtendedHeader{
+			Commit:    &types.Commit{},
+			RawHeader: header.RawHeader{Height: int64(recentHeight)},
+			DAH:       &share.AxisRoots{RowRoots: make([][]byte, 0)},
+		})
+
+		recentStarted := false
+		for !recentStarted {
+			select {
+			case <-ctx.Done():
+				require.FailNow(t, "recent worker was not admitted while retry backlog occupied non-recent budget")
+			case h := <-startedCh:
+				recentStarted = h == recentHeight
+			}
+		}
+
+		cancel()
+		close(waitCh)
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
+		defer stopCancel()
+		assert.NoError(t, coordinator.wait(stopCtx))
+	})
+
+	t.Run("retry only workload wakes when backoff elapses", func(t *testing.T) {
+		testParams := defaultTestParams()
+		testParams.dasParams.ConcurrencyLimit = 2
+		testParams.dasParams.SamplingRange = 1
+		testParams.dasParams.SampleTimeout = time.Hour
+
+		ctx, cancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
+		defer cancel()
+
+		startedCh := make(chan struct{}, 1)
+		waitCh := make(chan struct{})
+		sampleFn := func(ctx context.Context, h *header.ExtendedHeader) error {
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-waitCh:
+				return nil
+			}
+		}
+
+		coordinator := newSamplingCoordinator(
+			testParams.dasParams,
+			getterStub{},
+			sampleFn,
+			newBroadcastMock(1),
+		)
+
+		cp := checkpoint{
+			SampleFrom:  2,
+			NetworkHead: 1,
+			Failed:      map[uint64]int{1: 1},
+			Workers:     []workerCheckpoint{},
+		}
+
+		go coordinator.run(ctx, cp)
+
+		select {
+		case <-ctx.Done():
+			require.FailNow(t, "retry worker did not start after backoff elapsed")
+		case <-startedCh:
+		}
+
+		cancel()
+		close(waitCh)
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
+		defer stopCancel()
+		assert.NoError(t, coordinator.wait(stopCtx))
+	})
+
 	t.Run("failed should be stored", func(t *testing.T) {
 		testParams := defaultTestParams()
 		testParams.sampleFrom = 1
@@ -268,10 +403,16 @@ func TestCoordinator(t *testing.T) {
 		}
 
 		waitCh := make(chan struct{})
-		var wg sync.WaitGroup
-		wg.Add(testParams.dasParams.ConcurrencyLimit)
+		expectedStarts := testParams.dasParams.ConcurrencyLimit
+		if expectedStarts > 1 {
+			expectedStarts--
+		}
+		startedCh := make(chan struct{}, expectedStarts)
 		sampleFn := func(ctx context.Context, h *header.ExtendedHeader) error {
-			wg.Done()
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -288,8 +429,14 @@ func TestCoordinator(t *testing.T) {
 		)
 
 		go coordinator.run(ctx, ch)
+		for i := 0; i < expectedStarts; i++ {
+			select {
+			case <-startedCh:
+			case <-ctx.Done():
+				require.FailNow(t, "coordinator did not start expected workers before timeout", "expected starts: %d", expectedStarts)
+			}
+		}
 		cancel()
-		wg.Wait()
 		close(waitCh)
 
 		stopCtx, cancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
@@ -297,7 +444,91 @@ func TestCoordinator(t *testing.T) {
 		assert.NoError(t, coordinator.wait(stopCtx))
 
 		st := coordinator.state.unsafeStats()
-		require.Equal(t, ch, newCheckpoint(st))
+		persisted := newCheckpoint(st)
+		require.Equal(t, ch.NetworkHead, persisted.NetworkHead)
+		require.Equal(t, ch.Failed, persisted.Failed)
+	})
+
+	t.Run("cancel keeps graceful shutdown semantics with blocked workers", func(t *testing.T) {
+		testParams := defaultTestParams()
+		testParams.dasParams.ConcurrencyLimit = 4
+		testParams.dasParams.SamplingRange = 1
+		testParams.dasParams.SampleTimeout = time.Hour
+		ctx, cancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
+
+		expectedStarts := testParams.dasParams.ConcurrencyLimit
+		if expectedStarts > 1 {
+			expectedStarts--
+		}
+
+		startedCh := make(chan struct{}, expectedStarts)
+		sampleFn := func(ctx context.Context, h *header.ExtendedHeader) error {
+			select {
+			case startedCh <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+
+		coordinator := newSamplingCoordinator(
+			testParams.dasParams,
+			getterStub{},
+			sampleFn,
+			newBroadcastMock(1),
+		)
+
+		go coordinator.run(ctx, checkpoint{
+			SampleFrom:  1,
+			NetworkHead: 20,
+			Failed:      map[uint64]int{},
+			Workers:     []workerCheckpoint{},
+		})
+
+		for i := 0; i < expectedStarts; i++ {
+			select {
+			case <-startedCh:
+			case <-ctx.Done():
+				require.FailNow(t, "coordinator did not start expected workers before timeout", "expected starts: %d", expectedStarts)
+			}
+		}
+
+		cancel()
+
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), testParams.timeoutDelay)
+		defer stopCancel()
+		assert.NoError(t, coordinator.wait(stopCtx))
+	})
+}
+
+func TestSamplingCoordinator_nonRecentConcurrencyLimitReached(t *testing.T) {
+	t.Run("reserves one slot for recent jobs", func(t *testing.T) {
+		sc := &samplingCoordinator{concurrencyLimit: 3}
+		sc.state.inProgress = map[int]func() workerState{
+			1: func() workerState { return workerState{result: result{job: job{jobType: catchupJob}}} },
+			2: func() workerState { return workerState{result: result{job: job{jobType: retryJob}}} },
+		}
+
+		assert.True(t, sc.nonRecentConcurrencyLimitReached())
+	})
+
+	t.Run("recent worker does not consume reserved non-recent budget", func(t *testing.T) {
+		sc := &samplingCoordinator{concurrencyLimit: 3}
+		sc.state.inProgress = map[int]func() workerState{
+			1: func() workerState { return workerState{result: result{job: job{jobType: catchupJob}}} },
+			2: func() workerState { return workerState{result: result{job: job{jobType: recentJob}}} },
+		}
+
+		assert.False(t, sc.nonRecentConcurrencyLimitReached())
+	})
+
+	t.Run("single concurrency keeps existing behavior", func(t *testing.T) {
+		sc := &samplingCoordinator{concurrencyLimit: 1}
+		sc.state.inProgress = map[int]func() workerState{
+			1: func() workerState { return workerState{result: result{job: job{jobType: catchupJob}}} },
+		}
+
+		assert.True(t, sc.nonRecentConcurrencyLimitReached())
 	})
 }
 
@@ -348,10 +579,14 @@ func newMockSampler(sampledBefore, sampleTo uint64, bornToFail ...uint64) mockSa
 	}
 	return mockSampler{
 		checkpoint: checkpoint{
+			Version:     currentCheckpointVersion,
 			SampleFrom:  sampledBefore,
 			NetworkHead: sampleTo,
-			Failed:      make(map[uint64]int),
-			Workers:     make([]workerCheckpoint, 0),
+			Cursor: checkpointCursor{
+				CatchupHead: sampledBefore - 1,
+			},
+			Failed:  make(map[uint64]int),
+			Workers: make([]workerCheckpoint, 0),
 		},
 		bornToFail: failMap,
 		done:       make(map[uint64]int),
@@ -415,6 +650,8 @@ func (m *mockSampler) finalState() checkpoint {
 
 	finalState := m.checkpoint
 	finalState.SampleFrom = finalState.NetworkHead + 1
+	finalState.Cursor.CatchupHead = finalState.NetworkHead
+	finalState.Cursor.SampledChainHead = finalState.NetworkHead
 	return finalState
 }
 

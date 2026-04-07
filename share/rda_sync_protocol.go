@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -59,29 +60,33 @@ type SyncMessage struct {
 	Type SyncMessageType `json:"type"`
 
 	// Request-only fields
-	RequestCol  uint32 `json:"request_col,omitempty"`   // Cột nào muốn sync
-	RequestRow  uint32 `json:"request_row,omitempty"`   // Hàng client đang ở
-	SinceHeight uint64 `json:"since_height,omitempty"`  // Chỉ shares từ height này trở lên
+	RequestCol  uint32 `json:"request_col,omitempty"`  // Cột nào muốn sync
+	RequestRow  uint32 `json:"request_row,omitempty"`  // Hàng client đang ở
+	SinceHeight uint64 `json:"since_height,omitempty"` // Chỉ shares từ height này trở lên
+	PageOffset  uint32 `json:"page_offset,omitempty"`  // Pagination offset
+	PageLimit   uint32 `json:"page_limit,omitempty"`   // Pagination page size
 
 	// Response-only fields
-	Shares []SyncShareData `json:"shares,omitempty"` // Array S của shares
+	Shares     []SyncShareData `json:"shares,omitempty"` // Array S của shares
+	HasMore    bool            `json:"has_more,omitempty"`
+	NextOffset uint32          `json:"next_offset,omitempty"`
 
 	// Metadata
 	SenderID    string `json:"sender_id"`
-	Timestamp   int64  `json:"timestamp"`   // milliseconds
+	Timestamp   int64  `json:"timestamp"`    // milliseconds
 	BlockHeight uint64 `json:"block_height"` // Current block height
-	RequestID   string `json:"request_id"`  // To match response with request
+	RequestID   string `json:"request_id"`   // To match response with request
 }
 
 // SyncShareData - Minimal share data format for SYNC
 type SyncShareData struct {
-	Handle     string        `json:"handle"`
-	ShareIndex uint32        `json:"share_index"`
-	Row        uint32        `json:"row"`
-	Col        uint32        `json:"col"`
-	Data       []byte        `json:"data"`
-	Height     uint64        `json:"height"`
-	NMTProof   NMTProofData  `json:"nmt_proof"`
+	Handle     string       `json:"handle"`
+	ShareIndex uint32       `json:"share_index"`
+	Row        uint32       `json:"row"`
+	Col        uint32       `json:"col"`
+	Data       []byte       `json:"data"`
+	Height     uint64       `json:"height"`
+	NMTProof   NMTProofData `json:"nmt_proof"`
 }
 
 // ============================================================================
@@ -98,10 +103,10 @@ type RDASyncProtocolHandler struct {
 	mu             sync.RWMutex
 
 	// Statistics
-	totalSyncReceived    int64
-	totalSyncResponded   int64
-	totalSharesSent      int64
-	totalBytesTransfer   int64
+	totalSyncReceived  int64
+	totalSyncResponded int64
+	totalSharesSent    int64
+	totalBytesTransfer int64
 }
 
 // NewRDASyncProtocolHandler tạo handler mới
@@ -174,7 +179,13 @@ func (h *RDASyncProtocolHandler) handleSyncStream(stream network.Stream) {
 
 	// ========== BƯỚC 1: SCAN DATABASE ==========
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	shares, err := h.scanColumnShares(ctx, msg.RequestCol, msg.SinceHeight)
+	shares, latestHeight, hasMore, nextOffset, err := h.scanColumnShares(
+		ctx,
+		msg.RequestCol,
+		msg.SinceHeight,
+		msg.PageOffset,
+		msg.PageLimit,
+	)
 	cancel()
 
 	if err != nil {
@@ -198,9 +209,11 @@ func (h *RDASyncProtocolHandler) handleSyncStream(stream network.Stream) {
 	response := SyncMessage{
 		Type:        SyncMessageTypeResponse,
 		Shares:      shares,
+		HasMore:     hasMore,
+		NextOffset:  nextOffset,
 		SenderID:    h.host.ID().String(),
 		Timestamp:   time.Now().UnixNano() / 1e6,
-		BlockHeight: 0, // Placeholder
+		BlockHeight: latestHeight,
 		RequestID:   msg.RequestID,
 	}
 
@@ -229,18 +242,48 @@ func (h *RDASyncProtocolHandler) scanColumnShares(
 	ctx context.Context,
 	col uint32,
 	sinceHeight uint64,
-) ([]SyncShareData, error) {
-	// Placeholder implementation - trong thực tế scan từ RDAStorage
-	// For now, return empty list (Storage cần implement query interface riêng)
-	result := []SyncShareData{}
+	pageOffset uint32,
+	pageLimit uint32,
+) ([]SyncShareData, uint64, bool, uint32, error) {
+	effectiveSince := sinceHeight
+	if effectiveSince == 0 {
+		latestHeight, err := h.storage.GetLatestHeight(ctx)
+		if err == nil && latestHeight > MaxBlockHeightWindow {
+			effectiveSince = latestHeight - MaxBlockHeightWindow
+		}
+	}
 
-	// TODO: Implement actual DB scan when RDAStorage adds query API
-	// Should:
-	// 1. Iterate through stored shares
-	// 2. Filter: share.Col == col AND share.Height >= sinceHeight
-	// 3. Limit by MaxSharesPerSync
+	limit := pageLimit
+	if limit == 0 || limit > MaxSharesPerSync {
+		limit = MaxSharesPerSync
+	}
 
-	return result, nil
+	probeLimitU64 := uint64(pageOffset) + uint64(limit) + 1
+	if probeLimitU64 > uint64(math.MaxInt32) {
+		probeLimitU64 = uint64(math.MaxInt32)
+	}
+	probeLimit := int(probeLimitU64)
+
+	prefix, latestHeight, err := h.storage.ListColumnSharesSince(ctx, col, effectiveSince, probeLimit)
+	if err != nil {
+		return nil, 0, false, 0, err
+	}
+
+	if int(pageOffset) >= len(prefix) {
+		return []SyncShareData{}, latestHeight, false, pageOffset, nil
+	}
+
+	start := int(pageOffset)
+	end := start + int(limit)
+	if end > len(prefix) {
+		end = len(prefix)
+	}
+
+	shares := prefix[start:end]
+	hasMore := len(prefix) > start+int(limit)
+	nextOffset := uint32(end)
+
+	return shares, latestHeight, hasMore, nextOffset, nil
 }
 
 // GetStats trả về statistics
@@ -261,12 +304,14 @@ func (h *RDASyncProtocolHandler) GetStats() map[string]interface{} {
 // ============================================================================
 
 type RDASyncProtocolRequester struct {
-	host            host.Host
-	gridManager     *RDAGridManager
-	peerManager     *RDAPeerManager
-	storage         *RDAStorage
-	predicateChk    *RDAPredicateChecker
-	subnetMgr       *RDASubnetManager
+	host         host.Host
+	gridManager  *RDAGridManager
+	peerManager  *RDAPeerManager
+	storage      *RDAStorage
+	bridge       *RDAStorageWithBlockstore
+	predicateChk *RDAPredicateChecker
+	subnetMgr    *RDASubnetManager
+	metrics      *RDAMetrics
 
 	mu                  sync.RWMutex
 	syncDelay           time.Duration
@@ -276,10 +321,146 @@ type RDASyncProtocolRequester struct {
 	failedSyncs         int64
 	totalSharesReceived int64
 	totalBytesReceived  int64
+	auditAccepted       int64
+	auditIntegrityFail  int64
+	auditPredicateFail  int64
+	auditDedupSkipped   int64
+	auditStaleSkipped   int64
 
 	// To prevent multiple syncs
 	syncedOnce bool
 	syncOnce   sync.Once
+}
+
+type syncShareStorage interface {
+	StoreShare(context.Context, *RDAShare) error
+}
+
+func (r *RDASyncProtocolRequester) validateSyncShareIntegrity(shareData SyncShareData) error {
+	if shareData.Handle == "" {
+		return fmt.Errorf("missing handle")
+	}
+	if len(shareData.Data) == 0 {
+		return fmt.Errorf("empty share data")
+	}
+	if shareData.Col != shareData.ShareIndex%uint32(r.predicateChk.gridSize) {
+		return fmt.Errorf(
+			"column mismatch: index %d maps to col %d, got col %d",
+			shareData.ShareIndex,
+			shareData.ShareIndex%uint32(r.predicateChk.gridSize),
+			shareData.Col,
+		)
+	}
+	if shareData.Row >= uint32(r.predicateChk.gridSize) || shareData.Col >= uint32(r.predicateChk.gridSize) {
+		return fmt.Errorf("grid position out of bounds: row=%d col=%d", shareData.Row, shareData.Col)
+	}
+
+	return nil
+}
+
+func (r *RDASyncProtocolRequester) processSyncedShares(ctx context.Context, shares []SyncShareData) int {
+	storeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var writer syncShareStorage = r.storage
+	if r.bridge != nil {
+		writer = r.bridge
+	}
+
+	validCount := 0
+	seen := make(map[string]struct{}, len(shares))
+	for _, shareData := range shares {
+		recordedAttempt := false
+		recordAttempt := func(success bool) {
+			if recordedAttempt {
+				return
+			}
+			recordedAttempt = true
+			if r.metrics != nil {
+				r.metrics.RecordErasureRecoveryAttemptWithCounters(ctx, success)
+			}
+		}
+
+		key := fmt.Sprintf("%s:%d:%d:%d:%d", shareData.Handle, shareData.ShareIndex, shareData.Height, shareData.Row, shareData.Col)
+		if _, exists := seen[key]; exists {
+			r.auditDedupSkipped++
+			syncLog.Debugf("SYNC: Duplicate share skipped (h=%s, i=%d, height=%d)",
+				shareData.Handle, shareData.ShareIndex, shareData.Height)
+			recordAttempt(false)
+			continue
+		}
+		seen[key] = struct{}{}
+
+		if err := r.validateSyncShareIntegrity(shareData); err != nil {
+			r.auditIntegrityFail++
+			syncLog.Debugf("SYNC: Integrity check failed for share (h=%s, i=%d): %v",
+				shareData.Handle, shareData.ShareIndex, err)
+			recordAttempt(false)
+			continue
+		}
+
+		symbol := &RDASymbol{
+			Handle:     shareData.Handle,
+			ShareIndex: shareData.ShareIndex,
+			Row:        shareData.Row,
+			Col:        shareData.Col,
+			ShareData:  shareData.Data,
+			Timestamp:  int64(shareData.Height),
+			NMTProof:   shareData.NMTProof,
+		}
+
+		if !r.predicateChk.Pred(shareData.Handle, shareData.ShareIndex, symbol) {
+			r.auditPredicateFail++
+			syncLog.Debugf("SYNC: Predicate validation failed for (h=%s, i=%d)",
+				shareData.Handle, shareData.ShareIndex)
+			recordAttempt(false)
+			continue
+		}
+
+		existingHeight, exists, err := r.storage.GetLatestHeightForHandleAndSymbol(storeCtx, shareData.Handle, shareData.ShareIndex)
+		if err != nil {
+			syncLog.Warnf("SYNC: Failed to check existing share height: %v", err)
+			recordAttempt(false)
+			continue
+		}
+		if exists && existingHeight >= shareData.Height {
+			r.auditStaleSkipped++
+			syncLog.Debugf(
+				"SYNC: Stale/equal share skipped (h=%s, i=%d, incoming=%d, existing=%d)",
+				shareData.Handle,
+				shareData.ShareIndex,
+				shareData.Height,
+				existingHeight,
+			)
+			recordAttempt(false)
+			continue
+		}
+
+		rdaShare := &RDAShare{
+			Handle:   shareData.Handle,
+			Row:      shareData.Row,
+			Col:      shareData.Col,
+			SymbolID: shareData.ShareIndex,
+			Data:     shareData.Data,
+			Height:   shareData.Height,
+		}
+
+		if err := writer.StoreShare(storeCtx, rdaShare); err != nil {
+			syncLog.Warnf("SYNC: Failed to store share: %v", err)
+			recordAttempt(false)
+			continue
+		}
+
+		validCount++
+		r.totalSharesReceived++
+		r.auditAccepted++
+		if r.metrics != nil {
+			r.metrics.RecordDirectRecoveryBytes(ctx, int64(len(shareData.Data)))
+		}
+		recordAttempt(true)
+	}
+
+	return validCount
 }
 
 // NewRDASyncProtocolRequester tạo requester mới
@@ -294,6 +475,7 @@ func NewRDASyncProtocolRequester(
 	if syncDelay == 0 {
 		syncDelay = 4 * time.Second // Default: ~4 rounds
 	}
+	metrics, _ := InitRDAMetrics()
 	gridSize := uint32(gridManager.GetGridDimensions().Cols)
 	return &RDASyncProtocolRequester{
 		host:                host,
@@ -302,6 +484,7 @@ func NewRDASyncProtocolRequester(
 		storage:             storage,
 		predicateChk:        NewRDAPredicateChecker(gridSize),
 		subnetMgr:           subnetMgr,
+		metrics:             metrics,
 		syncDelay:           syncDelay,
 		requestTimeout:      10 * time.Second,
 		totalSyncAttempts:   0,
@@ -309,8 +492,20 @@ func NewRDASyncProtocolRequester(
 		failedSyncs:         0,
 		totalSharesReceived: 0,
 		totalBytesReceived:  0,
+		auditAccepted:       0,
+		auditIntegrityFail:  0,
+		auditPredicateFail:  0,
+		auditDedupSkipped:   0,
+		auditStaleSkipped:   0,
 		syncedOnce:          false,
 	}
+}
+
+// SetBlockstoreBridge configures SYNC requester to persist via bridge for reconstruction compatibility.
+func (r *RDASyncProtocolRequester) SetBlockstoreBridge(bridge *RDAStorageWithBlockstore) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bridge = bridge
 }
 
 // TriggerSyncOnStartup should be called in RDANodeService.Start() after discovery
@@ -384,94 +579,103 @@ func (r *RDASyncProtocolRequester) syncFromPeer(
 	myCol uint32,
 	myRow uint32,
 ) error {
-	// Open stream
+	const maxSyncPages = 64
+	requestID := fmt.Sprintf("%s-sync-%d", r.host.ID().String()[:8], time.Now().UnixNano())
+	offset := uint32(0)
+	totalValid := 0
+	totalReceived := 0
+
+	for page := 0; page < maxSyncPages; page++ {
+		resp, err := r.requestSyncPage(ctx, peerID, myCol, myRow, requestID, offset, MaxSharesPerSync)
+		if err != nil {
+			return err
+		}
+
+		start := time.Now()
+		validCount := r.processSyncedShares(context.Background(), resp.Shares)
+		if r.metrics != nil {
+			r.metrics.RecordDataRecoveryTime(context.Background(), float64(time.Since(start).Microseconds())/1000.0)
+		}
+
+		totalValid += validCount
+		totalReceived += len(resp.Shares)
+		r.totalBytesReceived += int64(len(resp.Shares))
+
+		if !resp.HasMore || len(resp.Shares) == 0 {
+			break
+		}
+		if resp.NextOffset <= offset {
+			return fmt.Errorf("invalid pagination response: next_offset=%d current_offset=%d", resp.NextOffset, offset)
+		}
+		offset = resp.NextOffset
+	}
+
+	syncLog.Infof("SYNC STORED ✓ - %d/%d shares validated and saved from %s",
+		totalValid, totalReceived, peerID.String()[:8])
+	syncLog.Infof(
+		"RDA|SYNC|AUDIT peer=%s accepted=%d integrity_fail=%d predicate_fail=%d dedup_skipped=%d stale_skipped=%d",
+		peerID.String()[:8],
+		r.auditAccepted,
+		r.auditIntegrityFail,
+		r.auditPredicateFail,
+		r.auditDedupSkipped,
+		r.auditStaleSkipped,
+	)
+
+	return nil
+}
+
+func (r *RDASyncProtocolRequester) requestSyncPage(
+	ctx context.Context,
+	peerID peer.ID,
+	myCol uint32,
+	myRow uint32,
+	requestID string,
+	pageOffset uint32,
+	pageLimit uint32,
+) (*SyncMessage, error) {
 	stream, err := r.host.NewStream(ctx, peerID, RDASyncProtocolID)
 	if err != nil {
-		return fmt.Errorf("failed to open stream: %w", err)
+		return nil, fmt.Errorf("failed to open stream: %w", err)
 	}
 	defer stream.Close()
 
-	syncLog.Debugf("SYNC: Opened stream to %s for col %d", peerID.String()[:8], myCol)
+	syncLog.Debugf("SYNC: Opened stream to %s for col %d offset=%d", peerID.String()[:8], myCol, pageOffset)
 
-	// Build request
 	req := SyncMessage{
 		Type:        SyncMessageTypeRequest,
 		RequestCol:  myCol,
 		RequestRow:  myRow,
-		SinceHeight: 0, // Get all data (could be optimized)
+		SinceHeight: 0,
+		PageOffset:  pageOffset,
+		PageLimit:   pageLimit,
 		SenderID:    r.host.ID().String(),
 		Timestamp:   time.Now().UnixNano() / 1e6,
-		RequestID:   fmt.Sprintf("%s-sync-%d", r.host.ID().String()[:8], time.Now().UnixNano()),
+		RequestID:   requestID,
 	}
 
-	// Send request
 	encoder := json.NewEncoder(stream)
 	if encErr := encoder.Encode(req); encErr != nil {
-		return fmt.Errorf("failed to send request: %w", encErr)
+		return nil, fmt.Errorf("failed to send request: %w", encErr)
 	}
 
-	// Set stream read deadline
 	if err := stream.SetReadDeadline(time.Now().Add(r.requestTimeout)); err != nil {
-		return fmt.Errorf("failed to set deadline: %w", err)
+		return nil, fmt.Errorf("failed to set deadline: %w", err)
 	}
 
-	// Read response
 	var resp SyncMessage
 	decoder := json.NewDecoder(stream)
 	if decodeErr := decoder.Decode(&resp); decodeErr != nil {
-		return fmt.Errorf("failed to decode response: %w", decodeErr)
+		return nil, fmt.Errorf("failed to decode response: %w", decodeErr)
 	}
-
 	if resp.Type != SyncMessageTypeResponse {
-		return fmt.Errorf("unexpected response type: %s", resp.Type)
+		return nil, fmt.Errorf("unexpected response type: %s", resp.Type)
+	}
+	if resp.RequestID != requestID {
+		return nil, fmt.Errorf("request ID mismatch: expected=%s got=%s", requestID, resp.RequestID)
 	}
 
-	// ========== BƯỚC 4: VALIDATE VÀ LƯU TỪNG SHARE ==========
-	storeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	validCount := 0
-	for _, shareData := range resp.Shares {
-		symbol := &RDASymbol{
-			Handle:     shareData.Handle,
-			ShareIndex: shareData.ShareIndex,
-			Row:        shareData.Row,
-			Col:        shareData.Col,
-			ShareData:  shareData.Data,
-			Timestamp:  int64(shareData.Height),
-			NMTProof:   shareData.NMTProof,
-		}
-
-		// Validate with Pred
-		if !r.predicateChk.Pred(shareData.Handle, shareData.ShareIndex, symbol) {
-			syncLog.Debugf("SYNC: Predicate validation failed for (h=%s, i=%d)",
-				shareData.Handle[:8], shareData.ShareIndex)
-			continue
-		}
-
-		// Store locally
-		rdaShare := &RDAShare{
-			Row:      shareData.Row,
-			Col:      shareData.Col,
-			SymbolID: shareData.ShareIndex,
-			Data:     shareData.Data,
-			Height:   shareData.Height,
-		}
-
-		if err := r.storage.StoreShare(storeCtx, rdaShare); err != nil {
-			syncLog.Warnf("SYNC: Failed to store share: %v", err)
-			continue
-		}
-
-		validCount++
-		r.totalSharesReceived++
-	}
-
-	r.totalBytesReceived += int64(len(resp.Shares))
-	syncLog.Infof("SYNC STORED ✓ - %d/%d shares validated and saved from %s",
-		validCount, len(resp.Shares), peerID.String()[:8])
-
-	return nil
+	return &resp, nil
 }
 
 // findColumnPeers tìm tất cả peers trong cùng cột
@@ -498,6 +702,11 @@ func (r *RDASyncProtocolRequester) GetStats() map[string]interface{} {
 		"failed_syncs":          r.failedSyncs,
 		"total_shares_received": r.totalSharesReceived,
 		"total_bytes_received":  r.totalBytesReceived,
+		"audit_accepted":        r.auditAccepted,
+		"audit_integrity_fail":  r.auditIntegrityFail,
+		"audit_predicate_fail":  r.auditPredicateFail,
+		"audit_dedup_skipped":   r.auditDedupSkipped,
+		"audit_stale_skipped":   r.auditStaleSkipped,
 		"synced":                r.syncedOnce,
 		"sync_delay":            r.syncDelay.String(),
 	}

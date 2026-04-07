@@ -8,6 +8,7 @@ import (
 
 	"github.com/celestiaorg/go-fraud"
 	libhead "github.com/celestiaorg/go-header"
+	"go.uber.org/fx"
 
 	"github.com/celestiaorg/celestia-node/das"
 	"github.com/celestiaorg/celestia-node/header"
@@ -27,6 +28,14 @@ func (d daserStub) SamplingStats(context.Context) (das.SamplingStats, error) {
 	return das.SamplingStats{}, errStub
 }
 
+func (d daserStub) RDADiagnostics(context.Context) (das.RDADiagnosticsStatus, error) {
+	return das.RDADiagnosticsStatus{}, errStub
+}
+
+func (d daserStub) RuntimeMode(context.Context) (das.RuntimeModeStatus, error) {
+	return das.RuntimeModeStatus{}, errStub
+}
+
 func (d daserStub) WaitCatchUp(context.Context) error {
 	return errStub
 }
@@ -35,14 +44,27 @@ func newDaserStub() Module {
 	return &daserStub{}
 }
 
+type daserInputs struct {
+	fx.In
+
+	DA         share.Availability
+	HSub       libhead.Subscriber[*header.ExtendedHeader]
+	Store      libhead.Store[*header.ExtendedHeader]
+	Batching   datastore.Batching
+	FraudServ  fraud.Service[*header.ExtendedHeader]
+	Broadcast  shrexsub.BroadcastFn
+	Options    []das.Option
+	RDAService *share.RDANodeService `optional:"true"`
+}
+
 func newDASer(
-	da share.Availability,
-	hsub libhead.Subscriber[*header.ExtendedHeader],
-	store libhead.Store[*header.ExtendedHeader],
-	batching datastore.Batching,
-	fraudServ fraud.Service[*header.ExtendedHeader],
-	bFn shrexsub.BroadcastFn,
-	options ...das.Option,
+	in daserInputs,
 ) (*das.DASer, error) {
-	return das.NewDASer(da, hsub, store, batching, fraudServ, bFn, options...)
+	options := make([]das.Option, 0, len(in.Options)+1)
+	options = append(options, in.Options...)
+	if adapter := newRDAServiceAdapter(in.RDAService); adapter != nil {
+		options = append(options, das.WithRDAAdapter(adapter))
+	}
+
+	return das.NewDASer(in.DA, in.HSub, in.Store, in.Batching, in.FraudServ, in.Broadcast, options...)
 }

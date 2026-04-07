@@ -1,0 +1,24 @@
+{
+    "rda_definition": "Robust Distributed Array",
+    "mode": "hybrid",
+    "fallback_active": true,
+    "get_request_total": 120,
+    "get_success_total": 108,
+    "get_timeout_total": 12,
+    "sync_request_total": 5,
+    "sync_symbols_received_total": 320,
+    "query_success_ratio": 0.9,
+    "fallback_ratio": 0.1,
+    "min_peers_per_subnet": 2,
+    "subnet_ready": true,
+    "topology": {
+        "Rows": 8,
+        "Cols": 8,
+        "RowPeers": 4,
+        "ColPeers": 4,
+        "TotalSubnetPeers": 6
+    },
+    "health": {
+        "Synced": true
+    }
+}

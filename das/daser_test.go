@@ -2,6 +2,7 @@ package das
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -103,6 +104,39 @@ func TestDASer_Restart(t *testing.T) {
 	require.NoError(t, err)
 	// ensure checkpoint is stored at 45
 	assert.EqualValues(t, 60, checkpoint.SampleFrom-1)
+}
+
+func TestDASer_CheckpointUnsupportedVersionResets(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+	mockGet, sub, mockService := createDASerSubcomponents(t, 5, 0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1))
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(map[string]any{
+		"version":      currentCheckpointVersion + 1,
+		"sample_from":  uint64(999),
+		"network_head": uint64(999),
+	})
+	require.NoError(t, err)
+	require.NoError(t, daser.store.Put(ctx, checkpointKey, raw))
+
+	cp, err := daser.checkpoint(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, currentCheckpointVersion, cp.Version)
+
+	tail, err := mockGet.Tail(ctx)
+	require.NoError(t, err)
+	head, err := mockGet.Head(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, tail.Height(), cp.SampleFrom)
+	assert.EqualValues(t, head.Height(), cp.NetworkHead)
 }
 
 // TODO(@walldiss): BEFP test will not work until BEFP-shwap integration
@@ -216,6 +250,362 @@ func TestDASerSampleTimeout(t *testing.T) {
 	case <-doneCh:
 	case <-ctx.Done():
 		t.Fatal("call context didn't timeout in time")
+	}
+}
+
+func TestDASer_ModeSelectionNoPanic(t *testing.T) {
+	testCases := []Mode{ModeRDA, ModeHybrid}
+
+	for _, mode := range testCases {
+		t.Run(string(mode), func(t *testing.T) {
+			ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+			ctrl := gomock.NewController(t)
+			avail := mocks.NewMockAvailability(ctrl)
+			avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+			mockGet, sub, mockService := createDASerSubcomponents(t, 5, 5)
+
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			t.Cleanup(cancel)
+
+			daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithMode(mode))
+			require.NoError(t, err)
+			require.NoError(t, daser.Start(ctx))
+			require.NoError(t, waitHeight(ctx, daser, 10))
+			require.NoError(t, daser.Stop(ctx))
+		})
+	}
+}
+
+type mockRDAAdapter struct{}
+
+func (mockRDAAdapter) QuerySymbol(_ context.Context, handle string, shareIndex uint32) (*RDASymbol, error) {
+	return &RDASymbol{Handle: handle, ShareIndex: shareIndex}, nil
+}
+
+func (mockRDAAdapter) SyncColumn(context.Context, uint64) error {
+	return nil
+}
+
+func (mockRDAAdapter) GetTopologySnapshot(context.Context) (RDATopologySnapshot, error) {
+	return RDATopologySnapshot{}, nil
+}
+
+func (mockRDAAdapter) GetHealthSnapshot(context.Context) (RDAHealthSnapshot, error) {
+	return RDAHealthSnapshot{}, nil
+}
+
+type diagnosticsRDAAdapter struct {
+	topo   RDATopologySnapshot
+	health RDAHealthSnapshot
+}
+
+func (a diagnosticsRDAAdapter) QuerySymbol(context.Context, string, uint32) (*RDASymbol, error) {
+	return &RDASymbol{}, nil
+}
+
+func (a diagnosticsRDAAdapter) SyncColumn(context.Context, uint64) error {
+	return nil
+}
+
+func (a diagnosticsRDAAdapter) GetTopologySnapshot(context.Context) (RDATopologySnapshot, error) {
+	return a.topo, nil
+}
+
+func (a diagnosticsRDAAdapter) GetHealthSnapshot(context.Context) (RDAHealthSnapshot, error) {
+	return a.health, nil
+}
+
+func TestDASer_WithRDAAdapterOption(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+	mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+	daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithRDAAdapter(mockRDAAdapter{}))
+	require.NoError(t, err)
+	require.NotNil(t, daser.rda)
+}
+
+func TestDASer_StopWithoutInitMetrics(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+	mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithMode(ModeClassic))
+	require.NoError(t, err)
+	require.NoError(t, daser.Start(ctx))
+	require.NoError(t, daser.Stop(ctx))
+}
+
+func TestDASer_InitMetrics_IsReentrantSafe(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+	mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithMode(ModeClassic))
+	require.NoError(t, err)
+
+	require.NoError(t, daser.InitMetrics())
+	require.NoError(t, daser.InitMetrics())
+
+	require.NoError(t, daser.Start(ctx))
+	require.NoError(t, daser.Stop(ctx))
+}
+
+func TestDASer_SamplingStatsIncludeRuntimeDiagnostics(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+	mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithMode(ModeHybrid))
+	require.NoError(t, err)
+	require.NoError(t, daser.Start(ctx))
+	t.Cleanup(func() {
+		require.NoError(t, daser.Stop(ctx))
+	})
+
+	stats, err := daser.SamplingStats(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "Robust Distributed Array", stats.RDADefinition)
+	require.Equal(t, ModeHybrid, stats.Mode)
+	require.False(t, stats.FallbackActive)
+
+	daser.observeRDAFallbackHit(ctx)
+
+	stats, err = daser.SamplingStats(ctx)
+	require.NoError(t, err)
+	require.True(t, stats.FallbackActive)
+}
+
+func TestDASer_RuntimeMode(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+	mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithMode(ModeRDA))
+	require.NoError(t, err)
+
+	mode, err := daser.RuntimeMode(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "Robust Distributed Array", mode.RDADefinition)
+	require.Equal(t, ModeRDA, mode.Mode)
+	require.False(t, mode.FallbackActive)
+
+	daser.observeRDAFallbackHit(ctx)
+	mode, err = daser.RuntimeMode(ctx)
+	require.NoError(t, err)
+	require.True(t, mode.FallbackActive)
+}
+
+func TestDASer_RDADiagnostics(t *testing.T) {
+	ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+	ctrl := gomock.NewController(t)
+	avail := mocks.NewMockAvailability(ctrl)
+	avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+	mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	t.Cleanup(cancel)
+
+	daser, err := NewDASer(
+		avail,
+		sub,
+		mockGet,
+		ds,
+		mockService,
+		newBroadcastMock(1),
+		WithMode(ModeHybrid),
+		WithRDAMinPeersPerSubnet(2),
+		WithRDAAdapter(diagnosticsRDAAdapter{
+			topo:   RDATopologySnapshot{Rows: 8, Cols: 8, RowPeers: 3, ColPeers: 2, TotalSubnetPeers: 4},
+			health: RDAHealthSnapshot{Synced: true},
+		}),
+	)
+	require.NoError(t, err)
+
+	daser.observeRDAGetRequest(ctx)
+	daser.observeRDAGetRequest(ctx)
+	daser.observeRDAGetSuccess(ctx)
+	daser.observeRDADirectHit(ctx)
+	daser.observeRDAFallbackHit(ctx)
+	daser.observeRDASyncRequest(ctx)
+	daser.observeRDASyncSymbolsReceived(ctx, 32)
+
+	diag, err := daser.RDADiagnostics(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "Robust Distributed Array", diag.RDADefinition)
+	require.Equal(t, ModeHybrid, diag.Mode)
+	require.True(t, diag.FallbackActive)
+	require.EqualValues(t, 2, diag.GetRequestTotal)
+	require.EqualValues(t, 1, diag.GetSuccessTotal)
+	require.EqualValues(t, 1, diag.SyncRequestTotal)
+	require.EqualValues(t, 32, diag.SyncSymbolsReceivedTotal)
+	require.Equal(t, 0.5, diag.QuerySuccessRatio)
+	require.Equal(t, 0.5, diag.FallbackRatio)
+	require.True(t, diag.SubnetReady)
+	require.Equal(t, 4, diag.Topology.TotalSubnetPeers)
+	require.True(t, diag.Health.Synced)
+	require.Empty(t, diag.TopologyError)
+	require.Empty(t, diag.HealthError)
+}
+
+func TestDASer_RestartResume_RDAAndHybridModes(t *testing.T) {
+	testCases := []Mode{ModeRDA, ModeHybrid}
+
+	for _, mode := range testCases {
+		t.Run(string(mode), func(t *testing.T) {
+			ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+			ctrl := gomock.NewController(t)
+			avail := mocks.NewMockAvailability(ctrl)
+			avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+			mockGet, sub, mockService := createDASerSubcomponents(t, 15, 15)
+
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			t.Cleanup(cancel)
+
+			daser, err := NewDASer(
+				avail,
+				sub,
+				mockGet,
+				ds,
+				mockService,
+				newBroadcastMock(1),
+				WithMode(mode),
+				WithRDAAdapter(mockRDAAdapter{}),
+			)
+			require.NoError(t, err)
+
+			require.NoError(t, daser.Start(ctx))
+			require.NoError(t, waitHeight(ctx, daser, 30))
+			require.NoError(t, daser.Stop(ctx))
+
+			head, err := mockGet.Head(ctx)
+			require.NoError(t, err)
+			mockGet, sub = createMockGetterAndSub(t, 15, 15, head)
+
+			restartCtx, restartCancel := context.WithTimeout(context.Background(), timeout)
+			t.Cleanup(restartCancel)
+
+			daser, err = NewDASer(
+				avail,
+				sub,
+				mockGet,
+				ds,
+				mockService,
+				newBroadcastMock(1),
+				WithMode(mode),
+				WithRDAAdapter(mockRDAAdapter{}),
+			)
+			require.NoError(t, err)
+
+			require.NoError(t, daser.Start(restartCtx))
+			require.NoError(t, waitHeight(restartCtx, daser, 60))
+			require.NoError(t, daser.Stop(restartCtx))
+
+			checkpoint, err := daser.store.load(ctx)
+			require.NoError(t, err)
+			assert.EqualValues(t, 60, checkpoint.SampleFrom-1)
+		})
+	}
+}
+
+func TestDASer_LegacyCheckpoint_DoesNotCrashNewBinary(t *testing.T) {
+	testCases := []Mode{ModeRDA, ModeHybrid}
+
+	for _, mode := range testCases {
+		t.Run(string(mode), func(t *testing.T) {
+			ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+			ctrl := gomock.NewController(t)
+			avail := mocks.NewMockAvailability(ctrl)
+			avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+			mockGet, sub, mockService := createDASerSubcomponents(t, 5, 5)
+
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			t.Cleanup(cancel)
+
+			daser, err := NewDASer(
+				avail,
+				sub,
+				mockGet,
+				ds,
+				mockService,
+				newBroadcastMock(1),
+				WithMode(mode),
+				WithRDAAdapter(mockRDAAdapter{}),
+			)
+			require.NoError(t, err)
+
+			legacyCheckpoint, err := json.Marshal(map[string]any{
+				"sample_from":  uint64(1),
+				"network_head": uint64(5),
+				"failed": map[string]int{
+					"2": 1,
+				},
+			})
+			require.NoError(t, err)
+			require.NoError(t, daser.store.Put(ctx, checkpointKey, legacyCheckpoint))
+
+			require.NoError(t, daser.Start(ctx))
+			require.NoError(t, waitHeight(ctx, daser, 10))
+			require.NoError(t, daser.Stop(ctx))
+
+			cp, err := daser.store.load(ctx)
+			require.NoError(t, err)
+			assert.EqualValues(t, currentCheckpointVersion, cp.Version)
+			assert.EqualValues(t, 10, cp.SampleFrom-1)
+		})
+	}
+}
+
+func TestDASer_MetricsRegistration_NoCallbackLeakOnRepeatedStartStop(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		ds := ds_sync.MutexWrap(datastore.NewMapDatastore())
+		ctrl := gomock.NewController(t)
+		avail := mocks.NewMockAvailability(ctrl)
+		avail.EXPECT().SharesAvailable(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
+
+		mockGet, sub, mockService := createDASerSubcomponents(t, 2, 2)
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		t.Cleanup(cancel)
+
+		daser, err := NewDASer(avail, sub, mockGet, ds, mockService, newBroadcastMock(1), WithMode(ModeClassic))
+		require.NoError(t, err)
+
+		require.NoError(t, daser.InitMetrics())
+		require.NoError(t, daser.Start(ctx))
+		require.NoError(t, waitHeight(ctx, daser, 4))
+		require.NoError(t, daser.Stop(ctx))
 	}
 }
 
