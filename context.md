@@ -106,3 +106,14 @@ Note: adjust exact tag and test name filters based on available tests in nodebui
   - `nodebuilder/tests/swamp/swamp.go`: for light nodes with RDA enabled, test startup/shutdown timeouts increased (startup 2m, shutdown 30s).
 - Validation status on Windows after patch:
   - `go test ./nodebuilder/tests -tags share -run '^TestShareModule$' -count=1` still fails due to Windows symlink/file-lock constraints (not due to timeout budget).
+
+## 9. Linux retest results after stabilization (2026-04-08)
+
+- `go test ./api -run TestAuthedRPC -count=1`: PASS
+- `go test ./nodebuilder/tests -tags share -run '^TestShareModule$' -count=1`: PASS
+- `go test ./nodebuilder/tests -tags p2p -run 'TestBridgeNodeAsBootstrapper|TestFullDiscoveryViaBootstrapper|TestRestartNodeDiscovery|TestRDA_GridAutoSize|TestRDA_GridDistribution_MockNet|TestRDA_BridgeNode_Service|TestRDA_Discovery_BootstrapAndRendezvous|TestRDA_Discovery_DHT_PeerFinding' -count=1`: PASS
+- `go test ./nodebuilder/tests -tags reconstruction -run 'TestFullReconstructFromBridge|TestFullReconstructFromFulls|TestFullReconstructFromLights' -count=1`: PASS
+- `make build`: PASS
+- `make test-unit`: PASS
+
+Current Linux confidence after stabilization: integration targets in context and build/unit checks are green.

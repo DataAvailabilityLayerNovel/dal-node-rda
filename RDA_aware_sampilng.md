@@ -469,7 +469,7 @@ RDA-aware DAS becomes:
 
 ### Integration Tests
 
-- [ ] nodebuilder/tests: light node sampling through RDA GET path.
+- [x] nodebuilder/tests: light node sampling through RDA GET path.
 - [ ] bootstrap/subnet discovery + DAS start synchronization.
 - [ ] recovery scenario: partial unavailability then recovery via sync/fallback.
 - [ ] robust distributed array subnet partition test (row/col isolated then healed).
@@ -478,7 +478,7 @@ RDA-aware DAS becomes:
 ### Integration gaps observed on Windows (to close on Linux)
 
 - [x] Re-run api auth RPC integration flow on Linux (`go test ./api -run TestAuthedRPC -count=1`) to avoid Windows symlink privilege and temp cleanup lock issues.
-- [ ] Re-run nodebuilder integration suites on Linux for RDA startup/discovery/recovery claims before checking Integration Tests items above.
+- [x] Re-run nodebuilder integration suites on Linux for RDA startup/discovery/recovery claims before checking Integration Tests items above.
 
 ### Integration stabilization work completed (test harness)
 

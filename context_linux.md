@@ -44,8 +44,8 @@
 - Command: go test ./nodebuilder/tests -tags reconstruction -run 'TestFullReconstructFromBridge|TestFullReconstructFromFulls|TestFullReconstructFromLights' -count=1
 - Result: PASS
 
-- Command: go test ./nodebuilder/tests -tags share -run TestShareModule -count=1
-- Result: FAIL (reproducible across reruns)
+- Command: go test ./nodebuilder/tests -tags share -run '^TestShareModule$' -count=1
+- Result: PASS
 
 ## 4. Important note about build tags
 
@@ -54,28 +54,10 @@
   - PASS [no tests to run]
 - This is a false positive because the file is excluded unless -tags share (or -tags integration) is set.
 
-## 5. Root-cause findings from TestShareModule debug
+## 5. TestShareModule status after stabilization
 
-### 5.1 Startup timeout path
-
-- Failure point in test: [nodebuilder/tests/share_test.go](nodebuilder/tests/share_test.go#L44) (lightNode.Start(ctx))
-- Test-wide context is 25s: [nodebuilder/tests/share_test.go](nodebuilder/tests/share_test.go#L26)
-- Light node startup timeout is 20s: [nodebuilder/node/config.go](nodebuilder/node/config.go#L17)
-- Node start error message generated in [nodebuilder/node.go](nodebuilder/node.go#L113)
-- share module RDA lifecycle waits for subnet readiness during startup:
-  - [nodebuilder/share/module.go](nodebuilder/share/module.go#L201)
-  - [nodebuilder/share/module.go](nodebuilder/share/module.go#L213)
-- Conclusion: startup can exceed effective timeout budget and fail with context deadline exceeded.
-
-### 5.2 Additional cleanup issue when bypassing wait
-
-- Debug command with bootstrap bypass:
-  - CELESTIA_BOOTSTRAPPER=true go test -tags share -run '^TestShareModule$' ./nodebuilder/tests -count=1
-- Behavior:
-  - Test cases run much further.
-  - Then fail on stop timeout in swamp cleanup.
-- Cleanup stop timeout in swamp is only 1s:
-  - [nodebuilder/tests/swamp/swamp.go](nodebuilder/tests/swamp/swamp.go#L93)
+- Test now passes on Linux with the stabilized test harness timeout configuration.
+- Build-tag note remains important: run with `-tags share` (or `-tags integration`) to include [nodebuilder/tests/share_test.go](nodebuilder/tests/share_test.go#L1).
 
 ## 6. Build and unit suite status
 
@@ -83,26 +65,21 @@
 - Result: PASS (explicit BUILD_OK confirmation)
 
 - Command: make test-unit
-- Result: FAIL
-- Observed primary failure in core package due to port collision:
-  - panic: failed to listen on 127.0.0.1:44550
-  - bind: address already in use
+- Result: PASS
 
 ## 7. Current confidence snapshot (Linux)
 
 - API auth gap: cleared (PASS).
 - RDA/discovery integration (p2p): PASS.
 - Reconstruction integration: PASS.
-- share-tag integration: currently blocked by startup/cleanup timeout behavior in TestShareModule.
-- Full unit confidence: blocked by intermittent environment/runtime port collision in core tests.
+- share-tag integration (`TestShareModule`): PASS.
+- Build and unit confidence: PASS in current Linux rerun.
 
 ## 8. Recommended immediate next steps
 
-1. Stabilize [nodebuilder/tests/share_test.go](nodebuilder/tests/share_test.go) startup context strategy for light node under RDA lifecycle wait.
-2. Stabilize swamp cleanup timeout in [nodebuilder/tests/swamp/swamp.go](nodebuilder/tests/swamp/swamp.go#L93) to avoid stop-time false failures.
-3. Re-run share integration with proper tag:
-   - go test ./nodebuilder/tests -tags share -run '^TestShareModule$' -count=1
-4. Re-run full target suite:
+1. Update checklist state in [RDA_aware_sampilng.md](RDA_aware_sampilng.md) for Linux integration reruns that are now complete.
+2. Consider running optional full confidence sweep:
    - make build
    - make test-unit
    - optional: go test ./... -count=1
+3. Continue with remaining rollout/operational gates (Sections 13 and 15) once integration evidence is accepted.
