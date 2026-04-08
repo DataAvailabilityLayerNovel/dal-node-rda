@@ -14,6 +14,7 @@ import (
 	libshare "github.com/celestiaorg/go-square/v3/share"
 
 	"github.com/celestiaorg/celestia-node/nodebuilder/core"
+	nodeDas "github.com/celestiaorg/celestia-node/nodebuilder/das"
 	"github.com/celestiaorg/celestia-node/nodebuilder/header"
 	"github.com/celestiaorg/celestia-node/nodebuilder/node"
 	"github.com/celestiaorg/celestia-node/nodebuilder/p2p"
@@ -142,6 +143,10 @@ func ParseAllFlags(cmd *cobra.Command, nodeType node.Type, args []string) error 
 	}
 
 	if err := share.ParseFlags(cmd, &cfg.Share); err != nil {
+		return err
+	}
+
+	if err := nodeDas.ParseFlags(cmd, &cfg.DASer); err != nil {
 		return err
 	}
 

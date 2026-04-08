@@ -5,6 +5,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/celestiaorg/celestia-node/nodebuilder/core"
+	dasmod "github.com/celestiaorg/celestia-node/nodebuilder/das"
 	"github.com/celestiaorg/celestia-node/nodebuilder/header"
 	"github.com/celestiaorg/celestia-node/nodebuilder/node"
 	"github.com/celestiaorg/celestia-node/nodebuilder/p2p"
@@ -19,6 +20,7 @@ func NewBridge(options ...func(*cobra.Command, []*pflag.FlagSet)) *cobra.Command
 		NodeFlags(),
 		p2p.Flags(),
 		share.Flags(),
+		dasmod.Flags(),
 		MiscFlags(),
 		core.Flags(),
 		rpc.Flags(),
@@ -47,6 +49,7 @@ func NewLight(options ...func(*cobra.Command, []*pflag.FlagSet)) *cobra.Command 
 		NodeFlags(),
 		p2p.Flags(),
 		share.Flags(),
+		dasmod.Flags(),
 		header.Flags(),
 		MiscFlags(),
 		core.Flags(),
