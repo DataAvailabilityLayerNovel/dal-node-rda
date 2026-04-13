@@ -200,6 +200,34 @@ func (pm *RDAPeerManager) GetColPeers() []peer.ID {
 	return peers
 }
 
+// GetRowPeersFor returns all connected peers in the provided row.
+func (pm *RDAPeerManager) GetRowPeersFor(row int) []peer.ID {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	var peers []peer.ID
+	if rowMap, ok := pm.rowPeers[row]; ok {
+		for peerID := range rowMap {
+			peers = append(peers, peerID)
+		}
+	}
+	return peers
+}
+
+// GetColPeersFor returns all connected peers in the provided column.
+func (pm *RDAPeerManager) GetColPeersFor(col int) []peer.ID {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	var peers []peer.ID
+	if colMap, ok := pm.colPeers[col]; ok {
+		for peerID := range colMap {
+			peers = append(peers, peerID)
+		}
+	}
+	return peers
+}
+
 // GetSubnetPeers returns all connected peers in same row or column
 func (pm *RDAPeerManager) GetSubnetPeers() []peer.ID {
 	pm.mu.RLock()

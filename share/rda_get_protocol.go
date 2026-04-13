@@ -649,10 +649,9 @@ func (r *RDAGetProtocolRequester) findIntersectionPeers(row, col uint32) []peer.
 	rowPeers := r.gridManager.GetRowPeers(int(row))
 	colPeers := r.gridManager.GetColPeers(int(col))
 	candidates := chooseQueryPeers(rowPeers, colPeers)
-	if len(candidates) == 0 {
-		// Compatibility fallback: if grid-indexed lookup has not converged yet,
-		// use peer manager's local row/col view.
-		candidates = chooseQueryPeers(r.peerManager.GetRowPeers(), r.peerManager.GetColPeers())
+	if len(candidates) == 0 && r.peerManager != nil {
+		// Compatibility fallback for pre-converged grid indexes: still keep target row/col semantics.
+		candidates = chooseQueryPeers(r.peerManager.GetRowPeersFor(int(row)), r.peerManager.GetColPeersFor(int(col)))
 	}
 
 	filtered := make([]peer.ID, 0, len(candidates))
