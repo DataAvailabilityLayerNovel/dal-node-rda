@@ -311,6 +311,7 @@ type RDAGetProtocolRequester struct {
 	gridManager      *RDAGridManager
 	peerManager      *RDAPeerManager
 	subnetMgr        *RDASubnetManager
+	localStorage     *RDAStorage
 	predicateChk     *RDAPredicateChecker
 	sendGetRequestFn func(context.Context, peer.ID, string, uint32) (*RDASymbol, error)
 
@@ -331,6 +332,7 @@ func NewRDAGetProtocolRequester(
 	gridManager *RDAGridManager,
 	peerManager *RDAPeerManager,
 	subnetMgr *RDASubnetManager,
+	localStorage *RDAStorage,
 ) *RDAGetProtocolRequester {
 	gridSize := uint32(gridManager.GetGridDimensions().Cols)
 	return &RDAGetProtocolRequester{
@@ -339,6 +341,7 @@ func NewRDAGetProtocolRequester(
 		gridManager:        gridManager,
 		peerManager:        peerManager,
 		subnetMgr:          subnetMgr,
+		localStorage:       localStorage,
 		predicateChk:       NewRDAPredicateChecker(gridSize),
 		sendGetRequestFn:   nil,
 		requestTimeout:     3 * time.Second,
@@ -427,6 +430,35 @@ func (r *RDAGetProtocolRequester) QueryShare(
 	myRow := uint32(myPos.Row)
 	getLog.Infof("RDA|GET|QUERY_START handle=%s index=%d targetCol=%d myRow=%d",
 		shortHandle(handle), shareIndex, targetCol, myRow)
+
+	// Local fast-path: if symbol maps to this node's column, try local storage first.
+	// This avoids unnecessary network roundtrips and prevents self-exclusion from
+	// causing false misses for symbols we should already hold.
+	if r.localStorage != nil && uint32(myPos.Col) == targetCol {
+		data, height, rowID, colID, err := r.localStorage.GetShareByHandleAndSymbol(ctx, handle, shareIndex)
+		if err == nil && len(data) > 0 {
+			symbol := &RDASymbol{
+				Handle:      handle,
+				ShareIndex:  shareIndex,
+				Row:         rowID,
+				Col:         colID,
+				ShareData:   data,
+				Timestamp:   time.Now().UnixNano() / 1e6,
+				BlockHeight: height,
+				NMTProof: NMTProofData{
+					Nodes:       [][]byte{},
+					RootHash:    []byte(handle),
+					NamespaceID: "rda",
+				},
+			}
+			r.successfulGets++
+			getLog.Infof("RDA|GET|LOCAL_HIT ✓ handle=%s index=%d row=%d col=%d", shortHandle(handle), shareIndex, rowID, colID)
+			return symbol, nil
+		}
+		if err != nil {
+			getLog.Debugf("RDA|GET|LOCAL_MISS handle=%s index=%d row=%d col=%d error=%v", shortHandle(handle), shareIndex, myPos.Row, myPos.Col, err)
+		}
+	}
 
 	// Step 2: Find peers at (myRow, targetCol) intersection.
 	queryPeers := r.findIntersectionPeers(myRow, targetCol)

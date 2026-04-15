@@ -194,7 +194,7 @@ func NewRDANodeService(
 	getHandler := NewRDAGetProtocolHandler(host, gridManager, peerManager, subnetManager, localStorage)
 
 	// Create GET protocol requester (for light nodes to query)
-	getRequester := NewRDAGetProtocolRequester(host, gridManager, peerManager, subnetManager)
+	getRequester := NewRDAGetProtocolRequester(host, gridManager, peerManager, subnetManager, localStorage)
 
 	// Create SYNC protocol handler (responder for sync requests)
 	syncHandler := NewRDASyncProtocolHandler(host, gridManager, localStorage)

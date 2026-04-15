@@ -221,3 +221,36 @@ func TestQueryShare_FallbackExcludesKnownWrongColumnPeers(t *testing.T) {
 	require.NotContains(t, got, wrongColPeerA)
 	require.NotContains(t, got, wrongColPeerB)
 }
+
+func TestQueryShare_UsesLocalStorageFastPath(t *testing.T) {
+	r := makeTestRequesterForQueryShare()
+
+	storage := NewRDAStorage(RDAStorageConfig{
+		MyRow:    uint32(r.peerManager.myPosition.Row),
+		MyCol:    uint32(r.peerManager.myPosition.Col),
+		GridSize: uint32(r.gridManager.GetGridDimensions().Cols),
+	})
+	r.localStorage = storage
+
+	ctx := context.Background()
+	require.NoError(t, storage.StoreShare(ctx, &RDAShare{
+		Handle:   "handle-12345678",
+		Row:      1,
+		Col:      2,
+		SymbolID: 10,
+		Data:     []byte("payload-local"),
+		Height:   99,
+	}))
+
+	calls := 0
+	r.sendGetRequestFn = func(context.Context, peer.ID, string, uint32) (*RDASymbol, error) {
+		calls++
+		return nil, ErrRDAPeerUnavailable
+	}
+
+	symbol, err := r.QueryShare(ctx, "handle-12345678", 10)
+	require.NoError(t, err)
+	require.NotNil(t, symbol)
+	require.Equal(t, []byte("payload-local"), symbol.ShareData)
+	require.Equal(t, 0, calls)
+}
