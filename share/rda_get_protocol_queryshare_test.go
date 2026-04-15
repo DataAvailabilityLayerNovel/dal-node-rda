@@ -84,3 +84,25 @@ func TestQueryShare_FailurePathDeterministicByRetryBudget(t *testing.T) {
 	require.Equal(t, 4, calls)
 	require.Equal(t, int64(1), r.failedRetries)
 }
+
+func TestQueryShare_DoesNotDialSelfWhenOnlyCandidate(t *testing.T) {
+	r := makeTestRequesterForQueryShare()
+
+	selfID := r.selfPeerID
+	r.peerManager.rowPeers[r.peerManager.myPosition.Row] = map[peer.ID]peerInfo{
+		selfID: {id: selfID, position: r.peerManager.myPosition},
+	}
+	r.peerManager.colPeers[r.peerManager.myPosition.Col] = map[peer.ID]peerInfo{
+		selfID: {id: selfID, position: r.peerManager.myPosition},
+	}
+
+	calls := 0
+	r.sendGetRequestFn = func(context.Context, peer.ID, string, uint32) (*RDASymbol, error) {
+		calls++
+		return nil, ErrRDAPeerUnavailable
+	}
+
+	_, err := r.QueryShare(context.Background(), "handle-12345678", 10)
+	require.ErrorIs(t, err, ErrRDAPeerUnavailable)
+	require.Equal(t, 0, calls)
+}

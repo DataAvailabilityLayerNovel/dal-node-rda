@@ -482,6 +482,15 @@ func (r *RDAGetProtocolRequester) sendGetRequest(
 	handle string,
 	shareIndex uint32,
 ) (*RDASymbol, error) {
+	selfID := r.selfPeerID
+	if selfID == "" && r.host != nil {
+		selfID = r.host.ID()
+	}
+	if selfID != "" && targetPeerID == selfID {
+		getLog.Debugf("RDA|GET|SELF_SKIP handle=%s index=%d peer=%s", shortHandle(handle), shareIndex, shortPeerID(targetPeerID))
+		return nil, fmt.Errorf("%w: refusing to dial self", ErrRDAPeerUnavailable)
+	}
+
 	getLog.Debugf("RDA|GET|SEND_START peer=%s handle=%s index=%d", shortPeerID(targetPeerID), shortHandle(handle), shareIndex)
 
 	// Open stream
@@ -643,6 +652,26 @@ func dedupeAndSortPeers(peers []peer.ID) []peer.ID {
 	return out
 }
 
+func excludePeer(peers []peer.ID, excluded peer.ID) []peer.ID {
+	if len(peers) == 0 {
+		return nil
+	}
+
+	if excluded == "" {
+		return peers
+	}
+
+	filtered := make([]peer.ID, 0, len(peers))
+	for _, p := range peers {
+		if p == excluded {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	return filtered
+}
+
 // findIntersectionPeers tìm tất cả peers tại (row, col)
 func (r *RDAGetProtocolRequester) findIntersectionPeers(row, col uint32) []peer.ID {
 	// Query grid by the requested target (row, col), then keep only connected peers.
@@ -659,12 +688,11 @@ func (r *RDAGetProtocolRequester) findIntersectionPeers(row, col uint32) []peer.
 		selfID = r.host.ID()
 	}
 
+	candidates = excludePeer(candidates, selfID)
+
 	filtered := make([]peer.ID, 0, len(candidates))
 	if r.host != nil {
 		for _, p := range candidates {
-			if p == selfID {
-				continue
-			}
 			if r.host.Network().Connectedness(p) == network.Connected {
 				filtered = append(filtered, p)
 			}
