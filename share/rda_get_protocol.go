@@ -654,10 +654,15 @@ func (r *RDAGetProtocolRequester) findIntersectionPeers(row, col uint32) []peer.
 		candidates = chooseQueryPeers(r.peerManager.GetRowPeersFor(int(row)), r.peerManager.GetColPeersFor(int(col)))
 	}
 
+	selfID := r.selfPeerID
+	if selfID == "" && r.host != nil {
+		selfID = r.host.ID()
+	}
+
 	filtered := make([]peer.ID, 0, len(candidates))
 	if r.host != nil {
 		for _, p := range candidates {
-			if p == r.selfPeerID {
+			if p == selfID {
 				continue
 			}
 			if r.host.Network().Connectedness(p) == network.Connected {
